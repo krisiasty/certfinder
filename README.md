@@ -1,2 +1,73 @@
 # certfinder
-find all certificates in specified path
+
+`certfinder` recursively finds PEM and DER encoded X.509 certificates and reports each certificate's file, subject, issuer, subject alternative names (SANs), extended key usage, and validity
+period.
+
+It uses only the Go standard library.
+
+## Build
+
+```console
+go build -o certfinder .
+```
+
+## Usage
+
+```console
+certfinder [options] PATH
+```
+
+For example:
+
+```console
+certfinder /etc
+certfinder -max-bytes 0 ./backup
+certfinder -max-bytes 8388608 -workers 4 .
+certfinder -usage=server -expiration=30d /etc/certificates
+certfinder -expired /etc/certificates
+certfinder -json /etc/certificates
+```
+
+The default scan reads at most the first 64 KiB of every regular file. This is enough for typical certificate files and avoids reading deeply into large images, archives, databases, logs, or
+other unrelated data. Set `-max-bytes 0` to inspect complete files, or choose a larger positive byte limit when certificates may appear later in a file.
+
+There is an unavoidable tradeoff: no scanner can prove that an arbitrary file does not contain an embedded certificate without inspecting the complete file. With a positive limit,
+`certfinder` may therefore miss a PEM certificate located after that limit. A DER certificate is recognized only when the complete file fits within the limit because DER has no reliable text
+marker and parsing arbitrary binary offsets would produce expensive false candidates.
+
+Use `-usage` to select certificates that support a particular extended key usage. Common values are `server`, `client`, `code-signing`, `email-protection`, `timestamping`, and
+`ocsp-signing`. The IPsec and Microsoft/Netscape usage names shown in normal or JSON output are also accepted. Certificates without an extended key usage extension are unrestricted and match
+every usage filter.
+
+Use `-expiration=30d` to print certificates that are already expired or will expire within 30 days. Standard Go duration units, such as `48h` or `90m`, are also accepted. `-expired` is a
+shortcut for `-expiration=0d`. The two flags cannot be combined.
+
+Directory symlinks are not followed. When `PATH` itself is a symlink to a regular file or directory, it is followed once.
+
+## Progress
+
+At startup, `certfinder` writes its name, version, resolved scan path, worker count, and effective options to stderr. A status line shows the number of files discovered and scanned, pending files,
+certificates found, and whether directory discovery is complete. The periodic status refresh is limited to once every five seconds.
+
+While directory discovery is running, the discovered-file total can increase. This keeps scanning single-pass and avoids delaying the scan with a separate counting traversal. When a certificate
+is found in text mode, its details replace the current terminal status line and a fresh status line is drawn beneath it. When stderr is redirected, progress is emitted as ordinary lines without
+terminal control sequences.
+
+Progress and structured logs use stderr. Certificate text and JSON use stdout, so `-json` output remains suitable for piping to another program.
+
+## Output
+
+Each certificate is printed separately, including certificates in PEM bundles:
+
+```text
+/etc/example/server.pem
+  Subject: CN=example.test,O=Example
+  Issuer: CN=Example Internal CA,O=Example
+  SANs: DNS:example.test, DNS:www.example.test, IP:192.0.2.10
+  Extended key usage: client, server
+  Valid from: 2026-01-15T12:00:00Z
+  Valid to: 2027-01-15T12:00:00Z
+```
+
+By default, server, client, dual-purpose, and unspecified-purpose certificates are all included. Pass `-json` to emit the filtered results as a JSON array with snake-case field names and RFC
+3339 timestamps. Runtime errors and warnings use structured `slog` text records on stderr, so JSON written to stdout remains valid.
