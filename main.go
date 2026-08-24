@@ -157,6 +157,9 @@ func printCertificate(output io.Writer, certificate scanner.Certificate) {
 	fmt.Fprintf(output, "  Issuer: %s\n", issuer)
 	fmt.Fprintf(output, "  SANs: %s\n", sans)
 	fmt.Fprintf(output, "  Extended key usage: %s\n", usages)
+	fmt.Fprintf(output, "  SHA-1 fingerprint: %s\n", certificate.SHA1Fingerprint)
+	fmt.Fprintf(output, "  SHA-256 fingerprint: %s\n", certificate.SHA256Fingerprint)
+	fmt.Fprintf(output, "  SPKI SHA-256 fingerprint: %s\n", certificate.SPKISHA256Fingerprint)
 	fmt.Fprintf(output, "  Valid from: %s\n", certificate.NotBefore.UTC().Format(time.RFC3339))
 	fmt.Fprintf(output, "  Valid to: %s\n", certificate.NotAfter.UTC().Format(time.RFC3339))
 }
@@ -242,14 +245,21 @@ func contains(values []string, wanted string) bool {
 }
 
 type jsonCertificate struct {
-	Path                         string   `json:"path"`
-	Subject                      string   `json:"subject"`
-	Issuer                       string   `json:"issuer"`
-	SANs                         []string `json:"sans"`
-	ExtendedKeyUsage             []string `json:"extended_key_usage"`
-	ExtendedKeyUsageUnrestricted bool     `json:"extended_key_usage_unrestricted"`
-	ValidFrom                    string   `json:"valid_from"`
-	ValidTo                      string   `json:"valid_to"`
+	Path                         string           `json:"path"`
+	Subject                      string           `json:"subject"`
+	Issuer                       string           `json:"issuer"`
+	SANs                         []string         `json:"sans"`
+	ExtendedKeyUsage             []string         `json:"extended_key_usage"`
+	ExtendedKeyUsageUnrestricted bool             `json:"extended_key_usage_unrestricted"`
+	Fingerprints                 jsonFingerprints `json:"fingerprints"`
+	ValidFrom                    string           `json:"valid_from"`
+	ValidTo                      string           `json:"valid_to"`
+}
+
+type jsonFingerprints struct {
+	SHA1       string `json:"sha1"`
+	SHA256     string `json:"sha256"`
+	SPKISHA256 string `json:"spki_sha256"`
 }
 
 func printJSON(output io.Writer, certificates []scanner.Certificate) error {
@@ -262,8 +272,13 @@ func printJSON(output io.Writer, certificates []scanner.Certificate) error {
 			SANs:                         append([]string{}, certificate.SANs...),
 			ExtendedKeyUsage:             append([]string{}, certificate.ExtendedKeyUsage...),
 			ExtendedKeyUsageUnrestricted: certificate.ExtendedKeyUsageUnrestricted,
-			ValidFrom:                    certificate.NotBefore.UTC().Format(time.RFC3339),
-			ValidTo:                      certificate.NotAfter.UTC().Format(time.RFC3339),
+			Fingerprints: jsonFingerprints{
+				SHA1:       certificate.SHA1Fingerprint,
+				SHA256:     certificate.SHA256Fingerprint,
+				SPKISHA256: certificate.SPKISHA256Fingerprint,
+			},
+			ValidFrom: certificate.NotBefore.UTC().Format(time.RFC3339),
+			ValidTo:   certificate.NotAfter.UTC().Format(time.RFC3339),
 		})
 	}
 	encoder := json.NewEncoder(output)

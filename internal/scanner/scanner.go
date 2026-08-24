@@ -4,7 +4,10 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"crypto/sha1" //nolint:gosec // SHA-1 is emitted only as a compatibility fingerprint.
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -72,6 +75,9 @@ type Certificate struct {
 	SANs                         []string
 	ExtendedKeyUsage             []string
 	ExtendedKeyUsageUnrestricted bool
+	SHA1Fingerprint              string
+	SHA256Fingerprint            string
+	SPKISHA256Fingerprint        string
 	NotBefore                    time.Time
 	NotAfter                     time.Time
 }
@@ -369,6 +375,9 @@ func parsePEM(data []byte) []*x509.Certificate {
 
 func describe(path string, index int, certificate *x509.Certificate) Certificate {
 	usages, unrestricted := formatExtendedKeyUsage(certificate)
+	sha1Fingerprint := sha1.Sum(certificate.Raw) //nolint:gosec // SHA-1 is required as an ecosystem-compatible certificate identifier.
+	sha256Fingerprint := sha256.Sum256(certificate.Raw)
+	spkiSHA256Fingerprint := sha256.Sum256(certificate.RawSubjectPublicKeyInfo)
 	return Certificate{
 		Path:                         path,
 		Index:                        index,
@@ -377,6 +386,9 @@ func describe(path string, index int, certificate *x509.Certificate) Certificate
 		SANs:                         formatSANs(certificate.DNSNames, certificate.IPAddresses, certificate.EmailAddresses, certificate.URIs),
 		ExtendedKeyUsage:             usages,
 		ExtendedKeyUsageUnrestricted: unrestricted,
+		SHA1Fingerprint:              hex.EncodeToString(sha1Fingerprint[:]),
+		SHA256Fingerprint:            hex.EncodeToString(sha256Fingerprint[:]),
+		SPKISHA256Fingerprint:        hex.EncodeToString(spkiSHA256Fingerprint[:]),
 		NotBefore:                    certificate.NotBefore,
 		NotAfter:                     certificate.NotAfter,
 	}

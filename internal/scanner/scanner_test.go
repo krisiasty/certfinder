@@ -5,8 +5,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha1" //nolint:gosec // The production compatibility fingerprint must be verified against SHA-1.
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"math/big"
 	"net"
@@ -126,6 +129,25 @@ func TestScanFindsPEMBundleAndDERCertificate(t *testing.T) {
 	}
 	if server.ExtendedKeyUsageUnrestricted {
 		t.Fatal("server certificate was marked as unrestricted")
+	}
+	sha1Digest := sha1.Sum(serverDER) //nolint:gosec // This verifies the required compatibility fingerprint.
+	wantSHA1Fingerprint := hex.EncodeToString(sha1Digest[:])
+	if server.SHA1Fingerprint != wantSHA1Fingerprint {
+		t.Fatalf("SHA-1 fingerprint = %q, want %q", server.SHA1Fingerprint, wantSHA1Fingerprint)
+	}
+	sha256Digest := sha256.Sum256(serverDER)
+	wantSHA256Fingerprint := hex.EncodeToString(sha256Digest[:])
+	if server.SHA256Fingerprint != wantSHA256Fingerprint {
+		t.Fatalf("SHA-256 fingerprint = %q, want %q", server.SHA256Fingerprint, wantSHA256Fingerprint)
+	}
+	parsedServer, err := x509.ParseCertificate(serverDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spkiDigest := sha256.Sum256(parsedServer.RawSubjectPublicKeyInfo)
+	wantSPKIFingerprint := hex.EncodeToString(spkiDigest[:])
+	if server.SPKISHA256Fingerprint != wantSPKIFingerprint {
+		t.Fatalf("SPKI SHA-256 fingerprint = %q, want %q", server.SPKISHA256Fingerprint, wantSPKIFingerprint)
 	}
 }
 

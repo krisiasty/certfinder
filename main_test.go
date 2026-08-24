@@ -65,18 +65,24 @@ func TestPrintCertificateIncludesIssuerAndValidity(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
 	printCertificate(&output, scanner.Certificate{
-		Path:             "/certificates/server.pem",
-		Subject:          "CN=server.example",
-		Issuer:           "CN=Example Test CA",
-		SANs:             []string{"DNS:server.example"},
-		ExtendedKeyUsage: []string{scanner.UsageServer},
-		NotBefore:        time.Date(2026, time.January, 2, 3, 4, 5, 0, time.FixedZone("test", 3600)),
-		NotAfter:         time.Date(2027, time.January, 2, 3, 4, 5, 0, time.FixedZone("test", 3600)),
+		Path:                  "/certificates/server.pem",
+		Subject:               "CN=server.example",
+		Issuer:                "CN=Example Test CA",
+		SANs:                  []string{"DNS:server.example"},
+		ExtendedKeyUsage:      []string{scanner.UsageServer},
+		SHA1Fingerprint:       "112233",
+		SHA256Fingerprint:     "aabbcc",
+		SPKISHA256Fingerprint: "ddeeff",
+		NotBefore:             time.Date(2026, time.January, 2, 3, 4, 5, 0, time.FixedZone("test", 3600)),
+		NotAfter:              time.Date(2027, time.January, 2, 3, 4, 5, 0, time.FixedZone("test", 3600)),
 	})
 
 	wantParts := []string{
 		"  Issuer: CN=Example Test CA\n",
 		"  Extended key usage: server\n",
+		"  SHA-1 fingerprint: 112233\n",
+		"  SHA-256 fingerprint: aabbcc\n",
+		"  SPKI SHA-256 fingerprint: ddeeff\n",
 		"  Valid from: 2026-01-02T02:04:05Z\n",
 		"  Valid to: 2027-01-02T02:04:05Z\n",
 	}
@@ -181,6 +187,9 @@ func TestPrintJSON(t *testing.T) {
 		SANs:                         []string{"DNS:server.example"},
 		ExtendedKeyUsage:             []string{scanner.UsageServer},
 		ExtendedKeyUsageUnrestricted: false,
+		SHA1Fingerprint:              "112233",
+		SHA256Fingerprint:            "aabbcc",
+		SPKISHA256Fingerprint:        "ddeeff",
 		NotBefore:                    time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
 		NotAfter:                     time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC),
 	}
@@ -191,6 +200,10 @@ func TestPrintJSON(t *testing.T) {
 	wantParts := []string{
 		`"path": "/certificates/server.pem"`,
 		`"extended_key_usage": [`,
+		`"fingerprints": {`,
+		`"sha1": "112233"`,
+		`"sha256": "aabbcc"`,
+		`"spki_sha256": "ddeeff"`,
 		`"valid_from": "2026-01-01T00:00:00Z"`,
 		`"valid_to": "2027-01-01T00:00:00Z"`,
 	}

@@ -1,7 +1,7 @@
 # certfinder
 
-`certfinder` recursively finds PEM and DER encoded X.509 certificates and reports each certificate's file, subject, issuer, subject alternative names (SANs), extended key usage, and validity
-period.
+`certfinder` recursively finds PEM and DER encoded X.509 certificates and reports each certificate's file, subject, issuer, subject alternative names (SANs), extended key usage, certificate and
+SPKI fingerprints, and validity period.
 
 It uses only the Go standard library.
 
@@ -65,9 +65,24 @@ Each certificate is printed separately, including certificates in PEM bundles:
   Issuer: CN=Example Internal CA,O=Example
   SANs: DNS:example.test, DNS:www.example.test, IP:192.0.2.10
   Extended key usage: client, server
+  SHA-1 fingerprint: 27b1462e7158f9489d662e9e41c52c8211015681
+  SHA-256 fingerprint: 8a1b7487ad907ebc857a079e25e941bb304077f5f488638efee6cc50ed09be85
+  SPKI SHA-256 fingerprint: 9fd236c32ec4a2a645e25d80ef1af7961e3706e98f2b60479063c69ae302d7df
   Valid from: 2026-01-15T12:00:00Z
   Valid to: 2027-01-15T12:00:00Z
 ```
+
+JSON groups the lowercase hexadecimal identifiers together:
+
+```json
+"fingerprints": {
+  "sha1": "27b1462e7158f9489d662e9e41c52c8211015681",
+  "sha256": "8a1b7487ad907ebc857a079e25e941bb304077f5f488638efee6cc50ed09be85",
+  "spki_sha256": "9fd236c32ec4a2a645e25d80ef1af7961e3706e98f2b60479063c69ae302d7df"
+}
+```
+
+SHA-1 is emitted only as a compatibility identifier for certificate-search ecosystems; it is not used for certificate validation or other security decisions.
 
 By default, server, client, dual-purpose, and unspecified-purpose certificates are all included. Pass `-json` to emit the filtered results as a JSON array with snake-case field names and RFC
 3339 timestamps. Runtime errors and warnings use structured `slog` text records on stderr, so JSON written to stdout remains valid.
