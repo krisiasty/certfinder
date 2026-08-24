@@ -95,6 +95,7 @@ func (display *progressDisplay) Update(progress scanner.Progress) {
 	}
 	display.progress.FilesDiscovered = max(display.progress.FilesDiscovered, progress.FilesDiscovered)
 	display.progress.FilesScanned = max(display.progress.FilesScanned, progress.FilesScanned)
+	display.progress.FilesCapped = max(display.progress.FilesCapped, progress.FilesCapped)
 	display.progress.CertificatesFound = max(display.progress.CertificatesFound, progress.CertificatesFound)
 	display.progress.ScanErrors = max(display.progress.ScanErrors, progress.ScanErrors)
 	display.progress.DiscoveryComplete = display.progress.DiscoveryComplete || progress.DiscoveryComplete
@@ -137,12 +138,15 @@ func (display *progressDisplay) Stop(completed bool) {
 	}
 	fmt.Fprintf(
 		display.progressOutput,
-		"%s: %d/%d files scanned; %d certificates found; %d errors; elapsed %s\n",
+		"%s: %d %s scanned, %d stopped at max-bytes; %d %s found; %d %s; elapsed %s\n",
 		state,
 		display.progress.FilesScanned,
-		display.progress.FilesDiscovered,
+		plural(display.progress.FilesScanned, "file", "files"),
+		display.progress.FilesCapped,
 		display.progress.CertificatesFound,
+		plural(display.progress.CertificatesFound, "certificate", "certificates"),
 		display.progress.ScanErrors,
+		plural(display.progress.ScanErrors, "error", "errors"),
 		elapsed,
 	)
 }
@@ -175,11 +179,12 @@ func (display *progressDisplay) drawStatusLocked() {
 		discovery = "discovery complete"
 	}
 	status := fmt.Sprintf(
-		"Scanning: %d/%d files scanned; %d pending; %d certificates found; %s",
+		"Scanning: %d/%d files scanned; %d pending; %d %s found; %s",
 		display.progress.FilesScanned,
 		display.progress.FilesDiscovered,
 		pending,
 		display.progress.CertificatesFound,
+		plural(display.progress.CertificatesFound, "certificate", "certificates"),
 		discovery,
 	)
 	if display.terminal {
@@ -187,6 +192,13 @@ func (display *progressDisplay) drawStatusLocked() {
 		return
 	}
 	fmt.Fprintln(display.progressOutput, status)
+}
+
+func plural(count int64, singular, multiple string) string {
+	if count == 1 {
+		return singular
+	}
+	return multiple
 }
 
 func (display *progressDisplay) clearStatusLocked() {

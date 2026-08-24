@@ -36,6 +36,7 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 	display.Update(scanner.Progress{
 		FilesDiscovered:   10,
 		FilesScanned:      10,
+		FilesCapped:       3,
 		CertificatesFound: 1,
 		DiscoveryComplete: true,
 	})
@@ -46,8 +47,8 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 		"Scan path:",
 		"Workers: 4\n",
 		"Options: max-bytes=65536 usage=server expiration=30d output=text\n",
-		"Scanning: 4/10 files scanned; 6 pending; 1 certificates found; discovering files...\n",
-		"Scan complete: 10/10 files scanned; 1 certificates found; 0 errors;",
+		"Scanning: 4/10 files scanned; 6 pending; 1 certificate found; discovering files...\n",
+		"Scan complete: 10 files scanned, 3 stopped at max-bytes; 1 certificate found; 0 errors;",
 	}
 	for _, part := range progressParts {
 		if !strings.Contains(progressOutput.String(), part) {

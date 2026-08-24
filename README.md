@@ -48,7 +48,8 @@ Directory symlinks are not followed. When `PATH` itself is a symlink to a regula
 ## Progress
 
 At startup, `certfinder` writes its name, version, resolved scan path, worker count, and effective options to stderr. A status line shows the number of files discovered and scanned, pending files,
-certificates found, and whether directory discovery is complete. The periodic status refresh is limited to once every five seconds.
+certificates found, and whether directory discovery is complete. The periodic status refresh is limited to once every five seconds. The final summary also reports how many files were stopped at
+the `-max-bytes` sniffing limit without triggering a full reread.
 
 While directory discovery is running, the discovered-file total can increase. This keeps scanning single-pass and avoids delaying the scan with a separate counting traversal. When a certificate
 is found in text mode, its details replace the current terminal status line and a fresh status line is drawn beneath it. When stderr is redirected, progress is emitted as ordinary lines without

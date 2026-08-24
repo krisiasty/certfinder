@@ -164,13 +164,28 @@ func TestScanHonorsByteLimit(t *testing.T) {
 	writeFile(t, earlyPath, early)
 
 	limit := int64(len(early) - 128)
-	report, err := Scan(context.Background(), directory, Options{MaxBytes: limit, Workers: 2})
+	var progressMu sync.Mutex
+	var boundedProgress Progress
+	report, err := Scan(context.Background(), directory, Options{
+		MaxBytes: limit,
+		Workers:  2,
+		OnProgress: func(progress Progress) {
+			progressMu.Lock()
+			defer progressMu.Unlock()
+			boundedProgress.FilesCapped = max(boundedProgress.FilesCapped, progress.FilesCapped)
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(report.Certificates) != 1 || report.Certificates[0].Path != earlyPath {
 		t.Fatalf("bounded scan found %+v, want only %s", report.Certificates, earlyPath)
 	}
+	progressMu.Lock()
+	if boundedProgress.FilesCapped != 1 {
+		t.Fatalf("bounded scan capped %d files, want 1", boundedProgress.FilesCapped)
+	}
+	progressMu.Unlock()
 
 	report, err = Scan(context.Background(), directory, Options{MaxBytes: 0, Workers: 2})
 	if err != nil {

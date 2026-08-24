@@ -62,6 +62,7 @@ type Options struct {
 type Progress struct {
 	FilesDiscovered   int64
 	FilesScanned      int64
+	FilesCapped       int64
 	CertificatesFound int64
 	ScanErrors        int64
 	DiscoveryComplete bool
@@ -108,11 +109,13 @@ type outcome struct {
 	certificates []Certificate
 	err          *FileError
 	scanned      bool
+	capped       bool
 }
 
 type progressCounters struct {
 	filesDiscovered   atomic.Int64
 	filesScanned      atomic.Int64
+	filesCapped       atomic.Int64
 	certificatesFound atomic.Int64
 	scanErrors        atomic.Int64
 	discoveryComplete atomic.Bool
@@ -228,6 +231,9 @@ func Scan(ctx context.Context, root string, options Options) (Report, error) {
 			report.Certificates = append(report.Certificates, result.certificates...)
 			if result.scanned {
 				counters.filesScanned.Add(1)
+				if result.capped {
+					counters.filesCapped.Add(1)
+				}
 				counters.certificatesFound.Add(int64(len(result.certificates)))
 			}
 			if result.err != nil {
@@ -253,6 +259,7 @@ func notifyProgress(callback func(Progress), counters *progressCounters) {
 	callback(Progress{
 		FilesDiscovered:   counters.filesDiscovered.Load(),
 		FilesScanned:      counters.filesScanned.Load(),
+		FilesCapped:       counters.filesCapped.Load(),
 		CertificatesFound: counters.certificatesFound.Load(),
 		ScanErrors:        counters.scanErrors.Load(),
 		DiscoveryComplete: counters.discoveryComplete.Load(),
@@ -278,8 +285,8 @@ func worker(ctx context.Context, jobs <-chan string, outcomes chan<- outcome, ma
 			if !ok {
 				return
 			}
-			certificates, err := scanFile(path, maxBytes)
-			result := outcome{certificates: certificates, scanned: true}
+			certificates, capped, err := scanFile(path, maxBytes)
+			result := outcome{certificates: certificates, scanned: true, capped: capped}
 			if err != nil {
 				result.err = &FileError{Path: path, Err: err}
 			}
@@ -310,10 +317,10 @@ func sendOutcome(ctx context.Context, outcomes chan<- outcome, result outcome) b
 	}
 }
 
-func scanFile(path string, maxBytes int64) ([]Certificate, error) {
+func scanFile(path string, maxBytes int64) ([]Certificate, bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer file.Close()
 
@@ -323,7 +330,7 @@ func scanFile(path string, maxBytes int64) ([]Certificate, error) {
 	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	complete := true
@@ -332,18 +339,18 @@ func scanFile(path string, maxBytes int64) ([]Certificate, error) {
 		if _, err := file.Read(extra[:]); err == nil {
 			complete = false
 		} else if !errors.Is(err, io.EOF) {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
 	parsed := parsePEM(data)
 	if len(parsed) > 0 && !complete {
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		data, err = io.ReadAll(file)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		parsed = parsePEM(data)
 		complete = true
@@ -358,7 +365,7 @@ func scanFile(path string, maxBytes int64) ([]Certificate, error) {
 	for index, certificate := range parsed {
 		result = append(result, describe(path, index, certificate))
 	}
-	return result, nil
+	return result, !complete, nil
 }
 
 func parsePEM(data []byte) []*x509.Certificate {
