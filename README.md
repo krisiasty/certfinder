@@ -28,12 +28,13 @@ certfinder -expired /etc/certificates
 certfinder -json /etc/certificates
 ```
 
-The default scan reads at most the first 64 KiB of every regular file. This is enough for typical certificate files and avoids reading deeply into large images, archives, databases, logs, or
-other unrelated data. Set `-max-bytes 0` to inspect complete files, or choose a larger positive byte limit when certificates may appear later in a file.
+The default scan initially reads at most the first 64 KiB of every regular file. This is enough to reject typical large images, archives, databases, logs, and other unrelated data. If that prefix
+contains a valid PEM certificate, `certfinder` rereads and parses the complete file so certificate bundles are never reported partially. Set `-max-bytes 0` to inspect every file completely, or
+choose a larger positive sniffing limit when a certificate may first appear later in a file.
 
 There is an unavoidable tradeoff: no scanner can prove that an arbitrary file does not contain an embedded certificate without inspecting the complete file. With a positive limit,
-`certfinder` may therefore miss a PEM certificate located after that limit. A DER certificate is recognized only when the complete file fits within the limit because DER has no reliable text
-marker and parsing arbitrary binary offsets would produce expensive false candidates.
+`certfinder` may therefore miss a file whose first PEM certificate is located after that limit. A DER certificate is recognized only when the complete file fits within the limit because DER has
+no reliable text marker and parsing arbitrary binary offsets would produce expensive false candidates.
 
 Use `-usage` to select certificates that support a particular extended key usage. Common values are `server`, `client`, `code-signing`, `email-protection`, `timestamping`, and
 `ocsp-signing`. The IPsec and Microsoft/Netscape usage names shown in normal or JSON output are also accepted. Certificates without an extended key usage extension are unrestricted and match

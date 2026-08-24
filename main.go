@@ -29,7 +29,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	flags := flag.NewFlagSet("certfinder", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	maxBytes := flags.Int64("max-bytes", scanner.DefaultMaxBytes, "maximum bytes read from each file; 0 reads complete files")
+	maxBytes := flags.Int64("max-bytes", scanner.DefaultMaxBytes, "initial bytes inspected per file; PEM matches are read fully; 0 reads all files fully")
 	workers := flags.Int("workers", min(runtime.GOMAXPROCS(0), 8), "number of files scanned concurrently")
 	usageValue := flags.String("usage", "", "filter by extended key usage, such as server or client")
 	expired := flags.Bool("expired", false, "shortcut for -expiration=0d")

@@ -25,8 +25,9 @@ import (
 )
 
 const (
-	// DefaultMaxBytes bounds I/O and memory use for large files. A value of
-	// zero in Options disables the limit.
+	// DefaultMaxBytes bounds the initial sniff of large files. Files with a
+	// valid PEM match are subsequently read completely. A value of zero in
+	// Options disables the initial limit.
 	DefaultMaxBytes int64 = 64 << 10
 	maxWorkers            = 8
 
@@ -336,6 +337,17 @@ func scanFile(path string, maxBytes int64) ([]Certificate, error) {
 	}
 
 	parsed := parsePEM(data)
+	if len(parsed) > 0 && !complete {
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		data, err = io.ReadAll(file)
+		if err != nil {
+			return nil, err
+		}
+		parsed = parsePEM(data)
+		complete = true
+	}
 	if len(parsed) == 0 && complete {
 		if certificates, derErr := x509.ParseCertificates(data); derErr == nil {
 			parsed = certificates

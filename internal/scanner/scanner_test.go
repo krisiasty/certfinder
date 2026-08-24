@@ -181,6 +181,29 @@ func TestScanHonorsByteLimit(t *testing.T) {
 	}
 }
 
+func TestScanReadsCompletePEMBundleAfterPrefixMatch(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	_, firstPEM, _ := makeCertificate(t, certificateSpec{serial: 6, common: "first.example"})
+	_, secondPEM, _ := makeCertificate(t, certificateSpec{serial: 7, common: "second.example"})
+
+	path := filepath.Join(directory, "large-bundle.pem")
+	padding := []byte(strings.Repeat("#", 256))
+	bundle := append(append(append([]byte{}, firstPEM...), padding...), secondPEM...)
+	writeFile(t, path, bundle)
+
+	report, err := Scan(context.Background(), path, Options{MaxBytes: int64(len(firstPEM)), Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Certificates) != 2 {
+		t.Fatalf("bundle scan found %d certificates, want 2", len(report.Certificates))
+	}
+	if report.Certificates[0].Subject != "CN=first.example" || report.Certificates[1].Subject != "CN=second.example" {
+		t.Fatalf("bundle subjects = %q, %q", report.Certificates[0].Subject, report.Certificates[1].Subject)
+	}
+}
+
 func TestScanSingleFileAndInvalidOptions(t *testing.T) {
 	t.Parallel()
 	_, certificatePEM, _ := makeCertificate(t, certificateSpec{serial: 4, common: "single.example"})
