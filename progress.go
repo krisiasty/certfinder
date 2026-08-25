@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -37,6 +38,7 @@ type progressDisplay struct {
 	mu       sync.Mutex
 	progress scanner.Progress
 	stopped  bool
+	writeErr error
 	done     chan struct{}
 	wait     sync.WaitGroup
 }
@@ -66,7 +68,7 @@ func (display *progressDisplay) Start(configuration scanConfiguration) {
 	if expiration == "" {
 		expiration = "none"
 	}
-	maxBytes := fmt.Sprintf("%d", configuration.MaxBytes)
+	maxBytes := strconv.FormatInt(configuration.MaxBytes, 10)
 	if configuration.MaxBytes == 0 {
 		maxBytes = "unlimited"
 	}
@@ -75,11 +77,17 @@ func (display *progressDisplay) Start(configuration scanConfiguration) {
 		output = "json"
 	}
 
-	fmt.Fprintf(display.progressOutput, "%s %s\n", programName, programVersion)
-	fmt.Fprintf(display.progressOutput, "Scan path: %s\n", path)
-	fmt.Fprintf(display.progressOutput, "Workers: %d\n", configuration.Workers)
-	fmt.Fprintf(display.progressOutput, "Options: max-bytes=%s usage=%s expiration=%s output=%s\n", maxBytes, usage, expiration, output)
-	fmt.Fprintln(display.progressOutput)
+	display.writeProgress("%s %s\n", programName, programVersion)
+	display.writeProgress("Scan path: %s\n", path)
+	display.writeProgress("Workers: %d\n", configuration.Workers)
+	display.writeProgress(
+		"Options: max-bytes=%s usage=%s expiration=%s output=%s\n",
+		maxBytes,
+		usage,
+		expiration,
+		output,
+	)
+	display.writeProgress("\n")
 	display.drawStatusLocked()
 	display.mu.Unlock()
 
@@ -110,8 +118,10 @@ func (display *progressDisplay) Certificate(certificate scanner.Certificate) {
 	if display.terminal {
 		display.clearStatusLocked()
 	}
-	printCertificate(display.certificateOutput, certificate)
-	fmt.Fprintln(display.progressOutput)
+	if display.writeErr == nil {
+		display.writeErr = printCertificate(display.certificateOutput, certificate)
+	}
+	display.writeProgress("\n")
 	display.drawStatusLocked()
 }
 
@@ -136,8 +146,7 @@ func (display *progressDisplay) Stop(completed bool) {
 	if completed {
 		state = "Scan complete"
 	}
-	fmt.Fprintf(
-		display.progressOutput,
+	display.writeProgress(
 		"%s: %d %s scanned, %d stopped at max-bytes; %d %s found; %d %s; elapsed %s\n",
 		state,
 		display.progress.FilesScanned,
@@ -149,6 +158,12 @@ func (display *progressDisplay) Stop(completed bool) {
 		plural(display.progress.ScanErrors, "error", "errors"),
 		elapsed,
 	)
+}
+
+func (display *progressDisplay) Err() error {
+	display.mu.Lock()
+	defer display.mu.Unlock()
+	return display.writeErr
 }
 
 func (display *progressDisplay) refreshLoop() {
@@ -188,10 +203,10 @@ func (display *progressDisplay) drawStatusLocked() {
 		discovery,
 	)
 	if display.terminal {
-		fmt.Fprint(display.progressOutput, status)
+		display.writeProgress("%s", status)
 		return
 	}
-	fmt.Fprintln(display.progressOutput, status)
+	display.writeProgress("%s\n", status)
 }
 
 func plural(count int64, singular, multiple string) string {
@@ -202,7 +217,14 @@ func plural(count int64, singular, multiple string) string {
 }
 
 func (display *progressDisplay) clearStatusLocked() {
-	fmt.Fprint(display.progressOutput, "\r\x1b[2K")
+	display.writeProgress("\r\x1b[2K")
+}
+
+func (display *progressDisplay) writeProgress(format string, arguments ...any) {
+	if display.writeErr != nil {
+		return
+	}
+	_, display.writeErr = fmt.Fprintf(display.progressOutput, format, arguments...)
 }
 
 func isTerminal(output io.Writer) bool {

@@ -27,7 +27,7 @@ func TestScanFindsPEMBundleAndDERCertificate(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
 	nested := filepath.Join(directory, "nested")
-	if err := os.Mkdir(nested, 0o755); err != nil {
+	if err := os.Mkdir(nested, 0o750); err != nil {
 		t.Fatal(err)
 	}
 

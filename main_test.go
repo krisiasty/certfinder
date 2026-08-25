@@ -64,7 +64,7 @@ func TestRunRejectsConflictingExpirationFilters(t *testing.T) {
 func TestPrintCertificateIncludesIssuerAndValidity(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
-	printCertificate(&output, scanner.Certificate{
+	err := printCertificate(&output, scanner.Certificate{
 		Path:                  "/certificates/server.pem",
 		Subject:               "CN=server.example",
 		Issuer:                "CN=Example Test CA",
@@ -76,6 +76,9 @@ func TestPrintCertificateIncludesIssuerAndValidity(t *testing.T) {
 		NotBefore:             time.Date(2026, time.January, 2, 3, 4, 5, 0, time.FixedZone("test", 3600)),
 		NotAfter:              time.Date(2027, time.January, 2, 3, 4, 5, 0, time.FixedZone("test", 3600)),
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	wantParts := []string{
 		"  Issuer: CN=Example Test CA\n",
