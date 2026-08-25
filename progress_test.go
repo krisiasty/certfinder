@@ -41,6 +41,9 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 		DiscoveryComplete: true,
 	})
 	display.Stop(true)
+	if err := display.Err(); err != nil {
+		t.Fatal(err)
+	}
 
 	progressParts := []string{
 		"certfinder 0.1.0\n",

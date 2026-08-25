@@ -30,7 +30,10 @@ const (
 	// Options disables the initial limit.
 	DefaultMaxBytes int64 = 64 << 10
 	maxWorkers            = 8
+)
 
+// Extended key usage filter names accepted by the scanner.
+const (
 	UsageAny                            = "any"
 	UsageServer                         = "server"
 	UsageClient                         = "client"
@@ -318,11 +321,11 @@ func sendOutcome(ctx context.Context, outcomes chan<- outcome, result outcome) b
 }
 
 func scanFile(path string, maxBytes int64) ([]Certificate, bool, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // Scan paths are explicitly supplied by the user.
 	if err != nil {
 		return nil, false, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	reader := io.Reader(file)
 	if maxBytes > 0 {

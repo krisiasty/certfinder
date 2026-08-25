@@ -1,3 +1,4 @@
+// Command certfinder finds and reports X.509 certificates in a filesystem tree.
 package main
 
 import (
@@ -20,9 +21,13 @@ import (
 )
 
 func main() {
+	os.Exit(execute())
+}
+
+func execute() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr))
+	return run(ctx, os.Args[1:], os.Stdout, os.Stderr)
 }
 
 func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int {
@@ -36,9 +41,9 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	expirationValue := flags.String("expiration", "", "print certificates expired or expiring within a duration, such as 30d")
 	jsonOutput := flags.Bool("json", false, "print results as JSON")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: certfinder [options] PATH")
-		fmt.Fprintln(stderr, "Find PEM or DER encoded X.509 certificates in PATH and its subdirectories.")
-		fmt.Fprintln(stderr)
+		_, _ = fmt.Fprintln(stderr, "Usage: certfinder [options] PATH")
+		_, _ = fmt.Fprintln(stderr, "Find PEM or DER encoded X.509 certificates in PATH and its subdirectories.")
+		_, _ = fmt.Fprintln(stderr)
 		flags.PrintDefaults()
 	}
 
@@ -109,6 +114,10 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		return 1
 	}
 	display.Stop(true)
+	if err := display.Err(); err != nil {
+		logger.Error("write output", "error", err)
+		return 1
+	}
 
 	filtered := make([]scanner.Certificate, 0, len(report.Certificates))
 	for _, certificate := range report.Certificates {
@@ -132,7 +141,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	return 0
 }
 
-func printCertificate(output io.Writer, certificate scanner.Certificate) {
+func printCertificate(output io.Writer, certificate scanner.Certificate) error {
 	subject := certificate.Subject
 	if subject == "" {
 		subject = "(empty)"
@@ -152,16 +161,24 @@ func printCertificate(output io.Writer, certificate scanner.Certificate) {
 		usages = strings.Join(certificate.ExtendedKeyUsage, ", ")
 	}
 
-	fmt.Fprintln(output, certificate.Path)
-	fmt.Fprintf(output, "  Subject: %s\n", subject)
-	fmt.Fprintf(output, "  Issuer: %s\n", issuer)
-	fmt.Fprintf(output, "  SANs: %s\n", sans)
-	fmt.Fprintf(output, "  Extended key usage: %s\n", usages)
-	fmt.Fprintf(output, "  SHA-1 fingerprint: %s\n", certificate.SHA1Fingerprint)
-	fmt.Fprintf(output, "  SHA-256 fingerprint: %s\n", certificate.SHA256Fingerprint)
-	fmt.Fprintf(output, "  SPKI SHA-256 fingerprint: %s\n", certificate.SPKISHA256Fingerprint)
-	fmt.Fprintf(output, "  Valid from: %s\n", certificate.NotBefore.UTC().Format(time.RFC3339))
-	fmt.Fprintf(output, "  Valid to: %s\n", certificate.NotAfter.UTC().Format(time.RFC3339))
+	lines := []string{
+		certificate.Path,
+		"  Subject: " + subject,
+		"  Issuer: " + issuer,
+		"  SANs: " + sans,
+		"  Extended key usage: " + usages,
+		"  SHA-1 fingerprint: " + certificate.SHA1Fingerprint,
+		"  SHA-256 fingerprint: " + certificate.SHA256Fingerprint,
+		"  SPKI SHA-256 fingerprint: " + certificate.SPKISHA256Fingerprint,
+		"  Valid from: " + certificate.NotBefore.UTC().Format(time.RFC3339),
+		"  Valid to: " + certificate.NotAfter.UTC().Format(time.RFC3339),
+	}
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(output, line); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func normalizeUsage(value string) (string, error) {
