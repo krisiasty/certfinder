@@ -46,7 +46,7 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 	}
 
 	progressParts := []string{
-		"certfinder 0.1.0\n",
+		"certfinder dev\n",
 		"Scan path:",
 		"Workers: 4\n",
 		"Options: max-bytes=65536 usage=server expiration=30d output=text\n",

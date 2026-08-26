@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/krisiasty/certfinder/internal/buildinfo"
 	"github.com/krisiasty/certfinder/internal/scanner"
 )
 
@@ -40,6 +41,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	expired := flags.Bool("expired", false, "shortcut for -expiration=0d")
 	expirationValue := flags.String("expiration", "", "print certificates expired or expiring within a duration, such as 30d")
 	jsonOutput := flags.Bool("json", false, "print results as JSON")
+	version := flags.Bool("version", false, "show version and build information")
 	flags.Usage = func() {
 		_, _ = fmt.Fprintln(stderr, "Usage: certfinder [options] PATH")
 		_, _ = fmt.Fprintln(stderr, "Find PEM or DER encoded X.509 certificates in PATH and its subdirectories.")
@@ -52,6 +54,13 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 			return 0
 		}
 		return 2
+	}
+	if *version {
+		if _, err := fmt.Fprintln(stdout, buildinfo.String()); err != nil {
+			logger.Error("write version", "error", err)
+			return 1
+		}
+		return 0
 	}
 	if flags.NArg() != 1 {
 		flags.Usage()
