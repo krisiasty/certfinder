@@ -8,11 +8,20 @@ It uses only the Go standard library.
 
 ## Install
 
+Homebrew on macOS:
+
+```sh
+brew install --cask krisiasty/tap/certfinder
+```
+
 Go 1.27 or newer is required:
 
 ```console
 go install github.com/krisiasty/certfinder@latest
 ```
+
+Tagged releases publish binaries for macOS, Linux, and Windows on AMD64 and ARM64. macOS releases also include
+`.tar.gz` archives used by the Homebrew cask. Windows filenames include the `.exe` extension.
 
 To build the current checkout instead:
 

@@ -3,7 +3,7 @@ version: 2
 project_name: certfinder
 
 builds:
-  - id: binaries
+  - id: darwin
     binary: certfinder
     ldflags:
       - -s -w
@@ -12,24 +12,56 @@ builds:
       - CGO_ENABLED=0
     goos:
       - darwin
-      - linux
     goarch:
       - amd64
       - arm64
-
-upx:
-  - enabled: true
-    compress: best
-    lzma: true
+  - id: others
+    binary: certfinder
+    ldflags:
+      - -s -w
+      - -X main.programVersion={{.Version}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
 
 # The binary format publishes executables directly without archive containers.
 archives:
   - id: raw-binaries
     ids:
-      - binaries
+      - darwin
+      - others
     formats:
       - binary
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: macos-archives
+    ids:
+      - darwin
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+homebrew_casks:
+  - name: certfinder
+    ids:
+      - macos-archives
+    homepage: "https://github.com/krisiasty/certfinder"
+    description: "X.509 certificate discovery and reporting tool"
+    license: "Apache-2.0"
+    repository:
+      owner: krisiasty
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    binaries:
+      - certfinder
+    hooks:
+      post:
+        install: |
+          system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", staged_path]
 
 checksum:
   name_template: "checksums.txt"
