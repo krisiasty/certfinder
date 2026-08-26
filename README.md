@@ -33,6 +33,7 @@ go build -o certfinder .
 
 ```console
 certfinder [options] PATH
+certfinder --version
 ```
 
 For example:
@@ -45,6 +46,8 @@ certfinder -usage=server -expiration=30d /etc/certificates
 certfinder -expired /etc/certificates
 certfinder -json /etc/certificates
 ```
+
+Use `--version` to print the version, commit, and build timestamp.
 
 The default scan initially reads at most the first 64 KiB of every regular file. This is enough to reject typical
 large images, archives, databases, logs, and other unrelated data. If that prefix contains a valid PEM certificate,

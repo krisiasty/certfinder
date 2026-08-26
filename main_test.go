@@ -33,6 +33,22 @@ func TestRunRequiresPath(t *testing.T) {
 	}
 }
 
+func TestRunVersion(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	if status := run(context.Background(), []string{"--version"}, &stdout, &stderr); status != 0 {
+		t.Fatalf("version status = %d, want 0; stderr = %q", status, stderr.String())
+	}
+	if want := "certfinder dev (commit unknown, built unknown)\n"; stdout.String() != want {
+		t.Fatalf("version output = %q, want %q", stdout.String(), want)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("version stderr = %q, want empty", stderr.String())
+	}
+}
+
 func TestRunJSONWithNoCertificates(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer

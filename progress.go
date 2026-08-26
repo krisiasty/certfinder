@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/krisiasty/certfinder/internal/buildinfo"
 	"github.com/krisiasty/certfinder/internal/scanner"
 )
 
@@ -16,8 +17,6 @@ const (
 	programName      = "certfinder"
 	progressInterval = 5 * time.Second
 )
-
-var programVersion = "0.1.0"
 
 type scanConfiguration struct {
 	Path       string
@@ -77,7 +76,7 @@ func (display *progressDisplay) Start(configuration scanConfiguration) {
 		output = "json"
 	}
 
-	display.writeProgress("%s %s\n", programName, programVersion)
+	display.writeProgress("%s %s\n", programName, buildinfo.Version())
 	display.writeProgress("Scan path: %s\n", path)
 	display.writeProgress("Workers: %d\n", configuration.Workers)
 	display.writeProgress(
