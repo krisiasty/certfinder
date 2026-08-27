@@ -27,6 +27,7 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 		Hostname:       "service.example.test",
 		Expiration:     "30d",
 		FailExpiring:   "14d",
+		IdentityMode:   identityModeDuplicates,
 		Output:         outputText,
 	})
 	display.Update(scanner.Progress{
@@ -48,6 +49,7 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 		CertificatesFound: 1,
 		DiscoveryComplete: true,
 	})
+	display.SetIdentitySummary(certificateIdentitySummary{Matched: 1, Unique: 1})
 	display.Stop(true)
 	if err := display.Err(); err != nil {
 		t.Fatal(err)
@@ -57,10 +59,12 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 		"certfinder dev\n",
 		"Scan path:",
 		"Workers: 4\n",
-		"Options: max-bytes=65536 usage=server hostname=service.example.test expiration=30d fail-expiring=14d output=text quiet=false\n",
+		"Options: max-bytes=65536 usage=server hostname=service.example.test expiration=30d fail-expiring=14d " +
+			"identity=duplicates output=text quiet=false\n",
 		"Traversal: exclude=.git,cache extensions=.pem,.crt one-file-system=true follow-symlinks=true ignore-errors=true\n",
 		"Scanning: 4/10 files scanned; 6 pending; 1 certificate found; discovering files...\n",
-		"Scan complete: 10 files scanned, 3 stopped at max-bytes; 1 certificate found; 0 errors;",
+		"Scan complete: 10 files scanned, 3 stopped at max-bytes; 1 certificate found; 1 certificate matched; " +
+			"1 unique certificate; 0 duplicate occurrences; 0 errors;",
 	}
 	for _, part := range progressParts {
 		if !strings.Contains(progressOutput.String(), part) {

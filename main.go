@@ -67,6 +67,8 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	expirationValue := flags.String("expiration", "", "print certificates expired or expiring within a duration, such as 30d")
 	failExpired := flags.Bool("fail-expired", false, "return the operational-finding status when an expired certificate matches")
 	failExpiringValue := flags.String("fail-expiring", "", "return the operational-finding status for matches expiring within a duration")
+	unique := flags.Bool("unique", false, "group identical certificates and print each SHA-256 fingerprint once")
+	duplicates := flags.Bool("duplicates", false, "print only SHA-256 groups found in more than one location")
 	jsonOutput := flags.Bool("json", false, "print results as JSON")
 	jsonLinesOutput := flags.Bool("jsonl", false, "stream one compact JSON object per matching certificate")
 	quiet := flags.Bool("quiet", false, "suppress startup, progress, and summary output")
@@ -142,11 +144,30 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		logger.Error("conflicting options", "options", "json,jsonl")
 		return exitUsageError
 	}
+	if *unique && *duplicates {
+		logger.Error("conflicting options", "options", "unique,duplicates")
+		return exitUsageError
+	}
+	if *jsonLinesOutput && (*unique || *duplicates) {
+		identityOption := "unique"
+		if *duplicates {
+			identityOption = "duplicates"
+		}
+		logger.Error("conflicting options", "options", "jsonl,"+identityOption)
+		return exitUsageError
+	}
 	failExpirationDescription := *failExpiringValue
 	if *failExpired {
 		failExpirationDescription = "0d"
 	}
 	hostnameFilter := hostname.String()
+	identityMode := identityModeAll
+	if *unique {
+		identityMode = identityModeUnique
+	} else if *duplicates {
+		identityMode = identityModeDuplicates
+	}
+	groupedOutput := identityMode != identityModeAll
 	outputFormat := outputText
 	if *jsonOutput {
 		outputFormat = outputJSON
@@ -168,6 +189,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		Hostname:       hostnameFilter,
 		Expiration:     expirationDescription,
 		FailExpiring:   failExpirationDescription,
+		IdentityMode:   identityMode,
 		Output:         outputFormat,
 		Quiet:          *quiet,
 	})
@@ -180,6 +202,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	}
 	var outputErr error
 	operationalFinding := false
+	identityCounts := make(map[string]int64)
 	var onProgress func(scanner.Progress)
 	if !*quiet {
 		onProgress = display.Update
@@ -191,14 +214,18 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		Extensions:          append([]string{}, extensions...),
 		OneFileSystem:       *oneFileSystem,
 		FollowSymlinks:      *followSymlinks,
-		DiscardCertificates: !*jsonOutput,
+		DiscardCertificates: !*jsonOutput && !groupedOutput,
 		OnProgress:          onProgress,
 		OnCertificate: func(certificate scanner.Certificate) {
 			if outputErr != nil || !certificateMatches(certificate, usage, hostnameFilter, expiration, hasExpiration, now) {
 				return
 			}
+			identityCounts[certificate.SHA256Fingerprint]++
 			if hasFailExpiration && certificateExpiresWithin(certificate, failExpiration, now) {
 				operationalFinding = true
+			}
+			if groupedOutput {
+				return
 			}
 			switch outputFormat {
 			case outputText:
@@ -221,6 +248,28 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		logger.Error("scan failed", "path", flags.Arg(0), "error", err)
 		return exitRuntimeError
 	}
+	var filtered []scanner.Certificate
+	var groups []certificateGroup
+	if *jsonOutput || groupedOutput {
+		filtered = make([]scanner.Certificate, 0, len(report.Certificates))
+		for _, certificate := range report.Certificates {
+			if certificateMatches(certificate, usage, hostnameFilter, expiration, hasExpiration, now) {
+				filtered = append(filtered, certificate)
+			}
+		}
+	}
+	if groupedOutput {
+		groups = groupCertificates(filtered)
+		if *duplicates {
+			groups = duplicateCertificateGroups(groups)
+		}
+		if outputFormat == outputText {
+			for _, group := range groups {
+				display.CertificateGroup(group)
+			}
+		}
+	}
+	display.SetIdentitySummary(summarizeCertificateIdentities(identityCounts))
 	display.Stop(true)
 	if err := display.Err(); err != nil {
 		logger.Error("write output", "error", err)
@@ -228,13 +277,13 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	}
 
 	if *jsonOutput {
-		filtered := make([]scanner.Certificate, 0, len(report.Certificates))
-		for _, certificate := range report.Certificates {
-			if certificateMatches(certificate, usage, hostnameFilter, expiration, hasExpiration, now) {
-				filtered = append(filtered, certificate)
-			}
+		var err error
+		if groupedOutput {
+			err = printJSONCertificateGroupsAt(stdout, groups, time.Now())
+		} else {
+			err = printJSONAt(stdout, filtered, time.Now())
 		}
-		if err := printJSONAt(stdout, filtered, time.Now()); err != nil {
+		if err != nil {
 			logger.Error("write JSON", "error", err)
 			return exitRuntimeError
 		}
@@ -362,6 +411,13 @@ func printCertificate(output io.Writer, certificate scanner.Certificate) error {
 }
 
 func printCertificateAt(output io.Writer, certificate scanner.Certificate, now time.Time) error {
+	if _, err := fmt.Fprintln(output, certificate.Path); err != nil {
+		return err
+	}
+	return printCertificateDetailsAt(output, certificate, now)
+}
+
+func printCertificateDetailsAt(output io.Writer, certificate scanner.Certificate, now time.Time) error {
 	subject := certificate.Subject
 	if subject == "" {
 		subject = "(empty)"
@@ -407,7 +463,6 @@ func printCertificateAt(output io.Writer, certificate scanner.Certificate, now t
 	}
 
 	lines := []string{
-		certificate.Path,
 		"  Subject: " + subject,
 		"  Issuer: " + issuer,
 		"  Serial number: " + serialNumber,
@@ -533,7 +588,7 @@ func contains(values []string, wanted string) bool {
 }
 
 type jsonCertificate struct {
-	Path                         string           `json:"path"`
+	Path                         string           `json:"path,omitempty"`
 	Subject                      string           `json:"subject"`
 	Issuer                       string           `json:"issuer"`
 	SerialNumber                 string           `json:"serial_number"`

@@ -47,6 +47,8 @@ certfinder -hostname=192.0.2.10 -json /etc/certificates
 certfinder -expired /etc/certificates
 certfinder -json /etc/certificates
 certfinder -jsonl -quiet /etc/certificates
+certfinder -unique /etc/certificates
+certfinder -duplicates -json /etc/certificates
 certfinder -usage=server -fail-expiring=30d -quiet /etc/certificates
 certfinder -exclude=.git -exclude='build/*' .
 certfinder -extensions=.pem,.crt -extensions=cer /etc
@@ -141,13 +143,50 @@ By default, any file or traversal error makes the command exit unsuccessfully af
 scanned. `-ignore-errors` preserves warnings and the final error count but returns success for these non-fatal errors.
 Invalid options and failures inspecting the scan root remain fatal.
 
+## Duplicate detection
+
+By default, output remains occurrence-based: every matching certificate in every file or bundle position is printed.
+Certificate identity is the SHA-256 fingerprint of the raw DER certificate, so certificates with similar metadata
+but different encodings are not grouped together.
+
+Use `-unique` to print one group for each matching fingerprint. Use `-duplicates` to print only groups with at least
+two occurrences. Both modes list every source path and its zero-based certificate index. Repeated entries in one PEM
+bundle count as separate locations, as do copies in different files.
+
+Selection filters such as `-usage`, `-hostname`, `-expiration`, and `-expired` are applied before grouping. Monitoring
+flags are evaluated against the same matching occurrences. `-unique` and `-duplicates` cannot be combined.
+
+Grouped modes require the complete result set to produce deterministic path and index ordering. They therefore work
+with text and `-json` output but cannot be combined with streaming `-jsonl`. Use `-json` when grouped structured output
+is required.
+
+Grouped JSON uses a separate, unambiguous schema with certificate metadata and a complete location list. For example,
+an abridged duplicate record looks like this:
+
+```json
+{
+  "certificate": {
+    "subject": "CN=service.example.test",
+    "fingerprints": {
+      "sha256": "57ddc5f785d733d2644396f55208842948a73c3b022346f106d43927be4bf8ee"
+    }
+  },
+  "locations": [
+    {"path": "/etc/service.pem", "index": 0},
+    {"path": "/etc/ca-bundle.pem", "index": 12}
+  ]
+}
+```
+
 ## Progress
 
 At startup, `certfinder` writes its name, version, resolved scan path, worker count, and all effective scan and
 traversal options to stderr. A status line shows the number of files discovered and scanned, pending files,
 certificates found, and whether directory discovery is complete. The periodic status refresh is limited to once
 every five seconds. The final summary also reports how many files were stopped at the `-max-bytes` sniffing limit
-without triggering a full reread.
+without triggering a full reread. Certificate identity counts are calculated after selection filters: `matched` is
+the number of matching occurrences, `unique` is the number of distinct SHA-256 fingerprints, and each occurrence
+after the first copy of a fingerprint is a `duplicate occurrence`.
 
 While directory discovery is running, the discovered-file total can increase. This keeps scanning single-pass and
 avoids delaying the scan with a separate counting traversal. When a certificate is found in text mode, its details
