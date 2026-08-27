@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -309,6 +310,153 @@ func TestRunRejectsConflictingExpirationFilters(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidHostnameFilters(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	for _, value := range []string{"", "*.example.test", "https://example.test", "bad name", "[2001:db8::1"} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		arguments := []string{"-hostname=" + value, directory}
+		if status := run(context.Background(), arguments, &stdout, &stderr); status != exitUsageError {
+			t.Errorf("-hostname=%q status = %d, want %d", value, status, exitUsageError)
+		}
+		if !strings.Contains(stderr.String(), "invalid value") {
+			t.Errorf("-hostname=%q error = %q, want a useful invalid-value error", value, stderr.String())
+		}
+	}
+}
+
+func TestRunHostnameFilterReturnsSameSetInEveryOutputMode(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	now := time.Now()
+	wantPath := writeTestCertificateWithSANs(
+		t, directory, "match.pem", now.Add(-time.Hour), now.Add(time.Hour), x509.ExtKeyUsageServerAuth,
+		[]string{"service.example.test"}, nil,
+	)
+	otherPath := writeTestCertificateWithSANs(
+		t, directory, "other.pem", now.Add(-time.Hour), now.Add(time.Hour), x509.ExtKeyUsageServerAuth,
+		[]string{"other.example.test"}, nil,
+	)
+
+	tests := []struct {
+		name    string
+		options []string
+	}{
+		{name: "text"},
+		{name: "JSON", options: []string{"-json"}},
+		{name: "JSON Lines", options: []string{"-jsonl"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			arguments := append(append([]string{}, test.options...), "-quiet", "-hostname=service.example.test", directory)
+			if status := run(context.Background(), arguments, &stdout, &stderr); status != exitSuccess {
+				t.Fatalf("status = %d; stderr = %q", status, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), wantPath) || strings.Contains(stdout.String(), otherPath) {
+				t.Fatalf("output = %q, want only %q", stdout.String(), wantPath)
+			}
+		})
+	}
+}
+
+func TestRunHostnameFilterAcceptsIPAddresses(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	now := time.Now()
+	wantPath := writeTestCertificateWithSANs(
+		t, directory, "match.pem", now.Add(-time.Hour), now.Add(time.Hour), x509.ExtKeyUsageServerAuth, nil,
+		[]net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("2001:db8::10")},
+	)
+	writeTestCertificateWithSANs(
+		t, directory, "other.pem", now.Add(-time.Hour), now.Add(time.Hour), x509.ExtKeyUsageServerAuth, nil,
+		[]net.IP{net.ParseIP("192.0.2.11"), net.ParseIP("2001:db8::11")},
+	)
+
+	for _, hostname := range []string{"192.0.2.10", "[2001:db8::10]"} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		arguments := []string{"-json", "-quiet", "-hostname=" + hostname, directory}
+		if status := run(context.Background(), arguments, &stdout, &stderr); status != exitSuccess {
+			t.Fatalf("-hostname=%q status = %d; stderr = %q", hostname, status, stderr.String())
+		}
+		var certificates []jsonCertificate
+		if err := json.Unmarshal(stdout.Bytes(), &certificates); err != nil {
+			t.Fatalf("decode -hostname=%q output: %v", hostname, err)
+		}
+		if len(certificates) != 1 || certificates[0].Path != wantPath {
+			t.Errorf("-hostname=%q paths = %+v, want only %q", hostname, certificates, wantPath)
+		}
+	}
+}
+
+func TestRunHostnameFilterComposesWithOtherFilters(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	now := time.Now()
+	dnsNames := []string{"service.example.test"}
+	wantPath := writeTestCertificateWithSANs(
+		t, directory, "match.pem", now.Add(-time.Hour), now.Add(12*time.Hour), x509.ExtKeyUsageServerAuth, dnsNames, nil,
+	)
+	writeTestCertificateWithSANs(
+		t, directory, "client.pem", now.Add(-time.Hour), now.Add(12*time.Hour), x509.ExtKeyUsageClientAuth, dnsNames, nil,
+	)
+	writeTestCertificateWithSANs(
+		t, directory, "later.pem", now.Add(-time.Hour), now.Add(48*time.Hour), x509.ExtKeyUsageServerAuth, dnsNames, nil,
+	)
+	expiredPath := writeTestCertificateWithSANs(
+		t, directory, "expired.pem", now.Add(-48*time.Hour), now.Add(-time.Hour), x509.ExtKeyUsageServerAuth, dnsNames, nil,
+	)
+	writeTestCertificateWithSANs(
+		t, directory, "other-name.pem", now.Add(-time.Hour), now.Add(12*time.Hour), x509.ExtKeyUsageServerAuth,
+		[]string{"other.example.test"}, nil,
+	)
+
+	tests := []struct {
+		name      string
+		options   []string
+		wantPaths []string
+	}{
+		{
+			name:      "usage and expiration",
+			options:   []string{"-usage=server", "-expiration=24h"},
+			wantPaths: []string{expiredPath, wantPath},
+		},
+		{
+			name:      "expired shortcut",
+			options:   []string{"-expired"},
+			wantPaths: []string{expiredPath},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			arguments := append([]string{"-json", "-quiet", "-hostname=service.example.test"}, test.options...)
+			arguments = append(arguments, directory)
+			if status := run(context.Background(), arguments, &stdout, &stderr); status != exitSuccess {
+				t.Fatalf("status = %d; stderr = %q", status, stderr.String())
+			}
+			var certificates []jsonCertificate
+			if err := json.Unmarshal(stdout.Bytes(), &certificates); err != nil {
+				t.Fatalf("decode JSON: %v; output = %q", err, stdout.String())
+			}
+			if len(certificates) != len(test.wantPaths) {
+				t.Fatalf("paths = %+v, want %v", certificates, test.wantPaths)
+			}
+			for index, certificate := range certificates {
+				if certificate.Path != test.wantPaths[index] {
+					t.Errorf("path %d = %q, want %q", index, certificate.Path, test.wantPaths[index])
+				}
+			}
+		})
+	}
+}
+
 func TestRunDisplaysTraversalOptions(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer
@@ -528,32 +676,32 @@ func TestCertificateFilters(t *testing.T) {
 		ExtendedKeyUsage: []string{scanner.UsageServer},
 		NotAfter:         now.Add(12 * time.Hour),
 	}
-	if !certificateMatches(server, scanner.UsageServer, 0, false, now) {
+	if !certificateMatches(server, scanner.UsageServer, "", 0, false, now) {
 		t.Fatal("server certificate did not match the server usage filter")
 	}
-	if certificateMatches(server, scanner.UsageClient, 0, false, now) {
+	if certificateMatches(server, scanner.UsageClient, "", 0, false, now) {
 		t.Fatal("server certificate matched the client usage filter")
 	}
-	if !certificateMatches(server, "", 24*time.Hour, true, now) {
+	if !certificateMatches(server, "", "", 24*time.Hour, true, now) {
 		t.Fatal("certificate expiring in 12 hours did not match a 24-hour window")
 	}
-	if certificateMatches(server, "", 6*time.Hour, true, now) {
+	if certificateMatches(server, "", "", 6*time.Hour, true, now) {
 		t.Fatal("certificate expiring in 12 hours matched a 6-hour window")
 	}
 
 	unrestricted := server
 	unrestricted.ExtendedKeyUsage = nil
 	unrestricted.ExtendedKeyUsageUnrestricted = true
-	if !certificateMatches(unrestricted, scanner.UsageClient, 0, false, now) {
+	if !certificateMatches(unrestricted, scanner.UsageClient, "", 0, false, now) {
 		t.Fatal("unrestricted certificate did not match the client usage filter")
 	}
 
 	expired := server
 	expired.NotAfter = now.Add(-time.Second)
-	if !certificateMatches(expired, "", 0, true, now) {
+	if !certificateMatches(expired, "", "", 0, true, now) {
 		t.Fatal("expired certificate did not match a zero-day expiration window")
 	}
-	if !certificateMatches(expired, "", 24*time.Hour, true, now) {
+	if !certificateMatches(expired, "", "", 24*time.Hour, true, now) {
 		t.Fatal("expired certificate did not match a future expiration window")
 	}
 }
@@ -623,6 +771,20 @@ func writeTestCertificate(
 	usage x509.ExtKeyUsage,
 ) string {
 	t.Helper()
+	return writeTestCertificateWithSANs(t, directory, name, notBefore, notAfter, usage, nil, nil)
+}
+
+func writeTestCertificateWithSANs(
+	t *testing.T,
+	directory string,
+	name string,
+	notBefore time.Time,
+	notAfter time.Time,
+	usage x509.ExtKeyUsage,
+	dnsNames []string,
+	ipAddresses []net.IP,
+) string {
+	t.Helper()
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -632,6 +794,8 @@ func writeTestCertificate(
 		Subject:      pkix.Name{CommonName: name},
 		NotBefore:    notBefore,
 		NotAfter:     notAfter,
+		DNSNames:     dnsNames,
+		IPAddresses:  ipAddresses,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{usage},
 	}

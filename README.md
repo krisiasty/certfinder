@@ -42,6 +42,8 @@ certfinder /etc
 certfinder -max-bytes 0 ./backup
 certfinder -max-bytes 8388608 -workers 4 .
 certfinder -usage=server -expiration=30d /etc/certificates
+certfinder -hostname=service.example.test /etc/certificates
+certfinder -hostname=192.0.2.10 -json /etc/certificates
 certfinder -expired /etc/certificates
 certfinder -json /etc/certificates
 certfinder -jsonl -quiet /etc/certificates
@@ -70,6 +72,12 @@ Use `-usage` to select certificates that support a particular extended key usage
 `client`, `code-signing`, `email-protection`, `timestamping`, and `ocsp-signing`. The IPsec and Microsoft/Netscape
 usage names shown in normal or JSON output are also accepted. Certificates without an extended key usage extension
 are unrestricted and match every usage filter.
+
+Use `-hostname=service.example.test` to print only certificates valid for a DNS name, or provide an IPv4 or IPv6
+address to match an IP SAN. Matching uses Go's `x509.Certificate.VerifyHostname`, including case-insensitive DNS
+names and left-most-label wildcards in certificate SANs. The supplied filter is a concrete service name, not a
+wildcard pattern, and the legacy Common Name is ignored. This filter composes with `-usage`, `-expiration`, and
+`-expired`, and selects the same certificates in text, JSON, and JSON Lines output.
 
 ## Expiration filtering versus monitoring
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path"
@@ -60,6 +61,8 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	followSymlinks := flags.Bool("follow-symlinks", false, "follow symlinks encountered below PATH while preventing cycles")
 	ignoreErrors := flags.Bool("ignore-errors", false, "exclude non-fatal file scan errors from the exit status")
 	usageValue := flags.String("usage", "", "filter by extended key usage, such as server or client")
+	var hostname hostnameFlag
+	flags.Var(&hostname, "hostname", "print only certificates valid for this DNS name or IP address")
 	expired := flags.Bool("expired", false, "shortcut for -expiration=0d")
 	expirationValue := flags.String("expiration", "", "print certificates expired or expiring within a duration, such as 30d")
 	failExpired := flags.Bool("fail-expired", false, "return the operational-finding status when an expired certificate matches")
@@ -143,6 +146,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	if *failExpired {
 		failExpirationDescription = "0d"
 	}
+	hostnameFilter := hostname.String()
 	outputFormat := outputText
 	if *jsonOutput {
 		outputFormat = outputJSON
@@ -161,6 +165,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		FollowSymlinks: *followSymlinks,
 		IgnoreErrors:   *ignoreErrors,
 		Usage:          usage,
+		Hostname:       hostnameFilter,
 		Expiration:     expirationDescription,
 		FailExpiring:   failExpirationDescription,
 		Output:         outputFormat,
@@ -189,7 +194,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		DiscardCertificates: !*jsonOutput,
 		OnProgress:          onProgress,
 		OnCertificate: func(certificate scanner.Certificate) {
-			if outputErr != nil || !certificateMatches(certificate, usage, expiration, hasExpiration, now) {
+			if outputErr != nil || !certificateMatches(certificate, usage, hostnameFilter, expiration, hasExpiration, now) {
 				return
 			}
 			if hasFailExpiration && certificateExpiresWithin(certificate, failExpiration, now) {
@@ -225,7 +230,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	if *jsonOutput {
 		filtered := make([]scanner.Certificate, 0, len(report.Certificates))
 		for _, certificate := range report.Certificates {
-			if certificateMatches(certificate, usage, expiration, hasExpiration, now) {
+			if certificateMatches(certificate, usage, hostnameFilter, expiration, hasExpiration, now) {
 				filtered = append(filtered, certificate)
 			}
 		}
@@ -248,6 +253,67 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 }
 
 type excludeFlag []string
+
+type hostnameFlag string
+
+func (hostname *hostnameFlag) String() string {
+	return string(*hostname)
+}
+
+func (hostname *hostnameFlag) Set(value string) error {
+	normalized, err := normalizeHostname(value)
+	if err != nil {
+		return err
+	}
+	*hostname = hostnameFlag(normalized)
+	return nil
+}
+
+func normalizeHostname(value string) (string, error) {
+	if value == "" {
+		return "", errors.New("hostname cannot be empty")
+	}
+	if value != strings.TrimSpace(value) {
+		return "", fmt.Errorf("invalid hostname or IP address %q", value)
+	}
+
+	addressValue := value
+	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
+		addressValue = value[1 : len(value)-1]
+	} else if strings.ContainsAny(value, "[]") {
+		return "", fmt.Errorf("invalid hostname or IP address %q", value)
+	}
+	if address, err := netip.ParseAddr(addressValue); err == nil {
+		return address.String(), nil
+	}
+	if err := validateDNSName(value); err != nil {
+		return "", fmt.Errorf("invalid hostname or IP address %q: %w", value, err)
+	}
+	return value, nil
+}
+
+func validateDNSName(value string) error {
+	value = strings.TrimSuffix(value, ".")
+	if value == "" || len(value) > 253 {
+		return errors.New("DNS name must contain between 1 and 253 characters")
+	}
+	for _, label := range strings.Split(value, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return errors.New("DNS labels must contain between 1 and 63 characters")
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return errors.New("DNS labels cannot start or end with a hyphen")
+		}
+		for _, character := range label {
+			if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+				character >= '0' && character <= '9' || character == '-' || character == '_' {
+				continue
+			}
+			return fmt.Errorf("DNS label contains unsupported character %q", character)
+		}
+	}
+	return nil
+}
 
 func (values *excludeFlag) String() string {
 	return strings.Join(*values, ",")
@@ -440,11 +506,15 @@ func certificateExpiresWithin(certificate scanner.Certificate, duration time.Dur
 func certificateMatches(
 	certificate scanner.Certificate,
 	usage string,
+	hostname string,
 	expiration time.Duration,
 	hasExpiration bool,
 	now time.Time,
 ) bool {
 	if usage != "" && !certificate.ExtendedKeyUsageUnrestricted && !contains(certificate.ExtendedKeyUsage, usage) {
+		return false
+	}
+	if hostname != "" && certificate.VerifyHostname(hostname) != nil {
 		return false
 	}
 	if hasExpiration {

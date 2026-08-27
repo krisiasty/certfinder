@@ -29,6 +29,7 @@ type scanConfiguration struct {
 	FollowSymlinks bool
 	IgnoreErrors   bool
 	Usage          string
+	Hostname       string
 	Expiration     string
 	FailExpiring   string
 	Output         string
@@ -77,6 +78,10 @@ func (display *progressDisplay) Start(configuration scanConfiguration) {
 	if usage == "" {
 		usage = "all"
 	}
+	hostname := configuration.Hostname
+	if hostname == "" {
+		hostname = "none"
+	}
 	expiration := configuration.Expiration
 	if expiration == "" {
 		expiration = "none"
@@ -98,9 +103,10 @@ func (display *progressDisplay) Start(configuration scanConfiguration) {
 	display.writeProgress("Scan path: %s\n", path)
 	display.writeProgress("Workers: %d\n", configuration.Workers)
 	display.writeProgress(
-		"Options: max-bytes=%s usage=%s expiration=%s fail-expiring=%s output=%s quiet=%t\n",
+		"Options: max-bytes=%s usage=%s hostname=%s expiration=%s fail-expiring=%s output=%s quiet=%t\n",
 		maxBytes,
 		usage,
+		hostname,
 		expiration,
 		failExpiring,
 		output,

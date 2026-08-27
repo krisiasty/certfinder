@@ -153,6 +153,43 @@ func TestScanFindsPEMBundleAndDERCertificate(t *testing.T) {
 	}
 }
 
+func TestCertificateVerifyHostname(t *testing.T) {
+	t.Parallel()
+	der, _, _ := makeCertificate(t, certificateSpec{
+		serial:   34,
+		common:   "legacy.example.test",
+		dnsNames: []string{"service.example.test", "*.wildcard.example.test"},
+		ips:      []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("2001:db8::10")},
+	})
+	parsed, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := describe("certificate.pem", 0, parsed)
+
+	for _, hostname := range []string{
+		"service.example.test",
+		"SERVICE.EXAMPLE.TEST",
+		"node.wildcard.example.test",
+		"192.0.2.10",
+		"[2001:db8::10]",
+	} {
+		if err := certificate.VerifyHostname(hostname); err != nil {
+			t.Errorf("VerifyHostname(%q): %v", hostname, err)
+		}
+	}
+	for _, hostname := range []string{
+		"other.example.test",
+		"deep.node.wildcard.example.test",
+		"192.0.2.11",
+		"legacy.example.test",
+	} {
+		if err := certificate.VerifyHostname(hostname); err == nil {
+			t.Errorf("VerifyHostname(%q) unexpectedly matched", hostname)
+		}
+	}
+}
+
 func TestScanHonorsByteLimit(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
