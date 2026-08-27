@@ -221,6 +221,32 @@ func TestScanReadsCompletePEMBundleAfterPrefixMatch(t *testing.T) {
 	}
 }
 
+func TestScanCanDiscardCertificatesAfterCallbacks(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	_, certificatePEM, _ := makeCertificate(t, certificateSpec{serial: 8, common: "streamed.example"})
+	writeFile(t, filepath.Join(directory, "streamed.pem"), certificatePEM)
+
+	var observed []Certificate
+	report, err := Scan(context.Background(), directory, Options{
+		MaxBytes:            DefaultMaxBytes,
+		Workers:             1,
+		DiscardCertificates: true,
+		OnCertificate: func(certificate Certificate) {
+			observed = append(observed, certificate)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Certificates) != 0 {
+		t.Fatalf("report retained %d certificates, want 0", len(report.Certificates))
+	}
+	if len(observed) != 1 || observed[0].Subject != "CN=streamed.example" {
+		t.Fatalf("callback certificates = %+v, want streamed.example", observed)
+	}
+}
+
 func TestScanSingleFileAndInvalidOptions(t *testing.T) {
 	t.Parallel()
 	_, certificatePEM, _ := makeCertificate(t, certificateSpec{serial: 4, common: "single.example"})

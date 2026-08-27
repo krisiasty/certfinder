@@ -23,6 +23,19 @@ import (
 	"github.com/krisiasty/certfinder/internal/scanner"
 )
 
+const (
+	exitSuccess = iota
+	exitRuntimeError
+	exitUsageError
+	exitOperationalFinding
+)
+
+const (
+	outputText  = "text"
+	outputJSON  = "json"
+	outputJSONL = "jsonl"
+)
+
 func main() {
 	os.Exit(execute())
 }
@@ -45,11 +58,15 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.Var(&extensions, "extensions", "scan only these file extensions; comma-separated or repeatable")
 	oneFileSystem := flags.Bool("one-file-system", false, "do not scan files or directories on other filesystems (Linux and macOS)")
 	followSymlinks := flags.Bool("follow-symlinks", false, "follow symlinks encountered below PATH while preventing cycles")
-	ignoreErrors := flags.Bool("ignore-errors", false, "return success despite non-fatal file scan errors")
+	ignoreErrors := flags.Bool("ignore-errors", false, "exclude non-fatal file scan errors from the exit status")
 	usageValue := flags.String("usage", "", "filter by extended key usage, such as server or client")
 	expired := flags.Bool("expired", false, "shortcut for -expiration=0d")
 	expirationValue := flags.String("expiration", "", "print certificates expired or expiring within a duration, such as 30d")
+	failExpired := flags.Bool("fail-expired", false, "return the operational-finding status when an expired certificate matches")
+	failExpiringValue := flags.String("fail-expiring", "", "return the operational-finding status for matches expiring within a duration")
 	jsonOutput := flags.Bool("json", false, "print results as JSON")
+	jsonLinesOutput := flags.Bool("jsonl", false, "stream one compact JSON object per matching certificate")
+	quiet := flags.Bool("quiet", false, "suppress startup, progress, and summary output")
 	version := flags.Bool("version", false, "show version and build information")
 	flags.Usage = func() {
 		_, _ = fmt.Fprintln(stderr, "Usage: certfinder [options] PATH")
@@ -60,42 +77,42 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 
 	if err := flags.Parse(arguments); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return 0
+			return exitSuccess
 		}
-		return 2
+		return exitUsageError
 	}
 	if *version {
 		if _, err := fmt.Fprintln(stdout, buildinfo.String()); err != nil {
 			logger.Error("write version", "error", err)
-			return 1
+			return exitRuntimeError
 		}
-		return 0
+		return exitSuccess
 	}
 	if flags.NArg() != 1 {
 		flags.Usage()
-		return 2
+		return exitUsageError
 	}
 	if *maxBytes < 0 {
 		logger.Error("invalid option", "option", "max-bytes", "error", "value cannot be negative")
-		return 2
+		return exitUsageError
 	}
 	if *workers < 1 {
 		logger.Error("invalid option", "option", "workers", "error", "value must be at least 1")
-		return 2
+		return exitUsageError
 	}
 	usage, err := normalizeUsage(*usageValue)
 	if err != nil {
 		logger.Error("invalid option", "option", "usage", "error", err)
-		return 2
+		return exitUsageError
 	}
 	expiration, hasExpiration, err := parseExpiration(*expirationValue)
 	if err != nil {
 		logger.Error("invalid option", "option", "expiration", "error", err)
-		return 2
+		return exitUsageError
 	}
 	if *expired && hasExpiration {
 		logger.Error("conflicting options", "options", "expired,expiration")
-		return 2
+		return exitUsageError
 	}
 	if *expired {
 		expiration = 0
@@ -105,8 +122,35 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	if *expired {
 		expirationDescription = "0d"
 	}
+	failExpiration, hasFailExpiration, err := parseDurationOption("fail-expiring", *failExpiringValue)
+	if err != nil {
+		logger.Error("invalid option", "option", "fail-expiring", "error", err)
+		return exitUsageError
+	}
+	if *failExpired && hasFailExpiration {
+		logger.Error("conflicting options", "options", "fail-expired,fail-expiring")
+		return exitUsageError
+	}
+	if *failExpired {
+		failExpiration = 0
+		hasFailExpiration = true
+	}
+	if *jsonOutput && *jsonLinesOutput {
+		logger.Error("conflicting options", "options", "json,jsonl")
+		return exitUsageError
+	}
+	failExpirationDescription := *failExpiringValue
+	if *failExpired {
+		failExpirationDescription = "0d"
+	}
+	outputFormat := outputText
+	if *jsonOutput {
+		outputFormat = outputJSON
+	} else if *jsonLinesOutput {
+		outputFormat = outputJSONL
+	}
 	now := time.Now()
-	display := newProgressDisplay(stderr, stdout, !*jsonOutput)
+	display := newProgressDisplay(stderr, stdout, outputFormat == outputText, *quiet)
 	display.Start(scanConfiguration{
 		Path:           flags.Arg(0),
 		Workers:        *workers,
@@ -118,44 +162,76 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		IgnoreErrors:   *ignoreErrors,
 		Usage:          usage,
 		Expiration:     expirationDescription,
-		JSON:           *jsonOutput,
+		FailExpiring:   failExpirationDescription,
+		Output:         outputFormat,
+		Quiet:          *quiet,
 	})
 
-	report, err := scanner.Scan(ctx, flags.Arg(0), scanner.Options{
-		MaxBytes:       *maxBytes,
-		Workers:        *workers,
-		Exclude:        append([]string{}, excludes...),
-		Extensions:     append([]string{}, extensions...),
-		OneFileSystem:  *oneFileSystem,
-		FollowSymlinks: *followSymlinks,
-		OnProgress:     display.Update,
+	scanContext, cancelScan := context.WithCancel(ctx)
+	defer cancelScan()
+	var jsonLinesEncoder *json.Encoder
+	if *jsonLinesOutput {
+		jsonLinesEncoder = json.NewEncoder(stdout)
+	}
+	var outputErr error
+	operationalFinding := false
+	var onProgress func(scanner.Progress)
+	if !*quiet {
+		onProgress = display.Update
+	}
+	report, err := scanner.Scan(scanContext, flags.Arg(0), scanner.Options{
+		MaxBytes:            *maxBytes,
+		Workers:             *workers,
+		Exclude:             append([]string{}, excludes...),
+		Extensions:          append([]string{}, extensions...),
+		OneFileSystem:       *oneFileSystem,
+		FollowSymlinks:      *followSymlinks,
+		DiscardCertificates: !*jsonOutput,
+		OnProgress:          onProgress,
 		OnCertificate: func(certificate scanner.Certificate) {
-			if certificateMatches(certificate, usage, expiration, hasExpiration, now) {
+			if outputErr != nil || !certificateMatches(certificate, usage, expiration, hasExpiration, now) {
+				return
+			}
+			if hasFailExpiration && certificateExpiresWithin(certificate, failExpiration, now) {
+				operationalFinding = true
+			}
+			switch outputFormat {
+			case outputText:
 				display.Certificate(certificate)
+			case outputJSONL:
+				outputErr = jsonLinesEncoder.Encode(newJSONCertificate(certificate, time.Now()))
+				if outputErr != nil {
+					cancelScan()
+				}
 			}
 		},
 	})
+	if outputErr != nil {
+		display.Stop(false)
+		logger.Error("write JSON Lines", "error", outputErr)
+		return exitRuntimeError
+	}
 	if err != nil {
 		display.Stop(false)
 		logger.Error("scan failed", "path", flags.Arg(0), "error", err)
-		return 1
+		return exitRuntimeError
 	}
 	display.Stop(true)
 	if err := display.Err(); err != nil {
 		logger.Error("write output", "error", err)
-		return 1
+		return exitRuntimeError
 	}
 
-	filtered := make([]scanner.Certificate, 0, len(report.Certificates))
-	for _, certificate := range report.Certificates {
-		if certificateMatches(certificate, usage, expiration, hasExpiration, now) {
-			filtered = append(filtered, certificate)
-		}
-	}
 	if *jsonOutput {
-		if err := printJSON(stdout, filtered); err != nil {
+		filtered := make([]scanner.Certificate, 0, len(report.Certificates))
+		for _, certificate := range report.Certificates {
+			if certificateMatches(certificate, usage, expiration, hasExpiration, now) {
+				filtered = append(filtered, certificate)
+			}
+		}
+		if err := printJSONAt(stdout, filtered, time.Now()); err != nil {
 			logger.Error("write JSON", "error", err)
-			return 1
+			return exitRuntimeError
 		}
 	}
 
@@ -163,9 +239,12 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		logger.Warn("path scan failed", "path", scanErr.Path, "error", scanErr.Err, "ignored", *ignoreErrors)
 	}
 	if len(report.Errors) > 0 && !*ignoreErrors {
-		return 1
+		return exitRuntimeError
 	}
-	return 0
+	if operationalFinding {
+		return exitOperationalFinding
+	}
+	return exitSuccess
 }
 
 type excludeFlag []string
@@ -325,6 +404,10 @@ func normalizeUsage(value string) (string, error) {
 }
 
 func parseExpiration(value string) (time.Duration, bool, error) {
+	return parseDurationOption("expiration", value)
+}
+
+func parseDurationOption(option, value string) (time.Duration, bool, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return 0, false, nil
@@ -335,19 +418,23 @@ func parseExpiration(value string) (time.Duration, bool, error) {
 	if strings.HasSuffix(value, "d") {
 		days, parseErr := strconv.ParseUint(strings.TrimSuffix(value, "d"), 10, 64)
 		if parseErr != nil || days > uint64((1<<63-1)/int64(24*time.Hour)) {
-			return 0, false, fmt.Errorf("invalid -expiration %q", value)
+			return 0, false, fmt.Errorf("invalid -%s %q", option, value)
 		}
 		duration = time.Duration(days) * 24 * time.Hour
 	} else {
 		duration, err = time.ParseDuration(value)
 		if err != nil {
-			return 0, false, fmt.Errorf("invalid -expiration %q: use a duration such as 30d or 48h", value)
+			return 0, false, fmt.Errorf("invalid -%s %q: use a duration such as 30d or 48h", option, value)
 		}
 	}
 	if duration < 0 {
-		return 0, false, errors.New("-expiration cannot be negative")
+		return 0, false, fmt.Errorf("-%s cannot be negative", option)
 	}
 	return duration, true, nil
+}
+
+func certificateExpiresWithin(certificate scanner.Certificate, duration time.Duration, now time.Time) bool {
+	return !certificate.NotAfter.After(now.Add(duration))
 }
 
 func certificateMatches(
@@ -406,41 +493,41 @@ type jsonFingerprints struct {
 	SPKISHA256 string `json:"spki_sha256"`
 }
 
-func printJSON(output io.Writer, certificates []scanner.Certificate) error {
-	return printJSONAt(output, certificates, time.Now())
-}
-
 func printJSONAt(output io.Writer, certificates []scanner.Certificate, now time.Time) error {
 	result := make([]jsonCertificate, 0, len(certificates))
 	for _, certificate := range certificates {
-		result = append(result, jsonCertificate{
-			Path:                         certificate.Path,
-			Subject:                      certificate.Subject,
-			Issuer:                       certificate.Issuer,
-			SerialNumber:                 certificate.SerialNumber,
-			IsCA:                         certificate.IsCA,
-			SelfSigned:                   certificate.SelfSigned,
-			SANs:                         append([]string{}, certificate.SANs...),
-			KeyUsage:                     append([]string{}, certificate.KeyUsage...),
-			ExtendedKeyUsage:             append([]string{}, certificate.ExtendedKeyUsage...),
-			ExtendedKeyUsageUnrestricted: certificate.ExtendedKeyUsageUnrestricted,
-			PublicKey: jsonPublicKey{
-				Algorithm: certificate.PublicKeyAlgorithm,
-				Bits:      certificate.PublicKeyBits,
-				Curve:     certificate.PublicKeyCurve,
-			},
-			SignatureAlgorithm: certificate.SignatureAlgorithm,
-			Fingerprints: jsonFingerprints{
-				SHA1:       certificate.SHA1Fingerprint,
-				SHA256:     certificate.SHA256Fingerprint,
-				SPKISHA256: certificate.SPKISHA256Fingerprint,
-			},
-			ValidFrom:      certificate.NotBefore.UTC().Format(time.RFC3339),
-			ValidTo:        certificate.NotAfter.UTC().Format(time.RFC3339),
-			ValidityStatus: certificate.ValidityStatus(now),
-		})
+		result = append(result, newJSONCertificate(certificate, now))
 	}
 	encoder := json.NewEncoder(output)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(result)
+}
+
+func newJSONCertificate(certificate scanner.Certificate, now time.Time) jsonCertificate {
+	return jsonCertificate{
+		Path:                         certificate.Path,
+		Subject:                      certificate.Subject,
+		Issuer:                       certificate.Issuer,
+		SerialNumber:                 certificate.SerialNumber,
+		IsCA:                         certificate.IsCA,
+		SelfSigned:                   certificate.SelfSigned,
+		SANs:                         append([]string{}, certificate.SANs...),
+		KeyUsage:                     append([]string{}, certificate.KeyUsage...),
+		ExtendedKeyUsage:             append([]string{}, certificate.ExtendedKeyUsage...),
+		ExtendedKeyUsageUnrestricted: certificate.ExtendedKeyUsageUnrestricted,
+		PublicKey: jsonPublicKey{
+			Algorithm: certificate.PublicKeyAlgorithm,
+			Bits:      certificate.PublicKeyBits,
+			Curve:     certificate.PublicKeyCurve,
+		},
+		SignatureAlgorithm: certificate.SignatureAlgorithm,
+		Fingerprints: jsonFingerprints{
+			SHA1:       certificate.SHA1Fingerprint,
+			SHA256:     certificate.SHA256Fingerprint,
+			SPKISHA256: certificate.SPKISHA256Fingerprint,
+		},
+		ValidFrom:      certificate.NotBefore.UTC().Format(time.RFC3339),
+		ValidTo:        certificate.NotAfter.UTC().Format(time.RFC3339),
+		ValidityStatus: certificate.ValidityStatus(now),
+	}
 }

@@ -13,7 +13,7 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 	t.Parallel()
 	var progressOutput bytes.Buffer
 	var certificateOutput bytes.Buffer
-	display := newProgressDisplay(&progressOutput, &certificateOutput, true)
+	display := newProgressDisplay(&progressOutput, &certificateOutput, true, false)
 	display.Start(scanConfiguration{
 		Path:           ".",
 		Workers:        4,
@@ -25,6 +25,8 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 		IgnoreErrors:   true,
 		Usage:          scanner.UsageServer,
 		Expiration:     "30d",
+		FailExpiring:   "14d",
+		Output:         outputText,
 	})
 	display.Update(scanner.Progress{
 		FilesDiscovered:   10,
@@ -54,7 +56,7 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 		"certfinder dev\n",
 		"Scan path:",
 		"Workers: 4\n",
-		"Options: max-bytes=65536 usage=server expiration=30d output=text\n",
+		"Options: max-bytes=65536 usage=server expiration=30d fail-expiring=14d output=text quiet=false\n",
 		"Traversal: exclude=.git,cache extensions=.pem,.crt one-file-system=true follow-symlinks=true ignore-errors=true\n",
 		"Scanning: 4/10 files scanned; 6 pending; 1 certificate found; discovering files...\n",
 		"Scan complete: 10 files scanned, 3 stopped at max-bytes; 1 certificate found; 0 errors;",
@@ -66,5 +68,30 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 	}
 	if !strings.Contains(certificateOutput.String(), "Subject: CN=server.example") {
 		t.Fatalf("certificate output = %q", certificateOutput.String())
+	}
+}
+
+func TestProgressDisplayQuietModeSuppressesProgressOnly(t *testing.T) {
+	t.Parallel()
+	var progressOutput bytes.Buffer
+	var certificateOutput bytes.Buffer
+	display := newProgressDisplay(&progressOutput, &certificateOutput, true, true)
+	display.Start(scanConfiguration{Path: ".", Workers: 1, Quiet: true})
+	display.Update(scanner.Progress{FilesDiscovered: 1, FilesScanned: 1, DiscoveryComplete: true})
+	display.Certificate(scanner.Certificate{
+		Path:      "/certificates/server.pem",
+		Subject:   "CN=server.example",
+		NotBefore: time.Now().Add(-time.Hour),
+		NotAfter:  time.Now().Add(time.Hour),
+	})
+	display.Stop(true)
+	if err := display.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if progressOutput.Len() != 0 {
+		t.Fatalf("quiet progress output = %q, want empty", progressOutput.String())
+	}
+	if !strings.Contains(certificateOutput.String(), "Subject: CN=server.example") {
+		t.Fatalf("quiet certificate output = %q", certificateOutput.String())
 	}
 }

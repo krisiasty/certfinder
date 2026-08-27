@@ -71,9 +71,12 @@ type Options struct {
 	Extensions     []string
 	OneFileSystem  bool
 	FollowSymlinks bool
-	OnProgress     func(Progress)
-	OnCertificate  func(Certificate)
-	filesystemID   func(os.FileInfo) (uint64, bool)
+	// DiscardCertificates prevents certificates from being retained in Report.
+	// OnCertificate callbacks and progress counters are unaffected.
+	DiscardCertificates bool
+	OnProgress          func(Progress)
+	OnCertificate       func(Certificate)
+	filesystemID        func(os.FileInfo) (uint64, bool)
 }
 
 // Progress is a point-in-time snapshot of a running scan. Callbacks may be
@@ -263,7 +266,9 @@ func Scan(ctx context.Context, root string, options Options) (Report, error) {
 				sortReport(&report)
 				return report, nil
 			}
-			report.Certificates = append(report.Certificates, result.certificates...)
+			if !options.DiscardCertificates {
+				report.Certificates = append(report.Certificates, result.certificates...)
+			}
 			if result.scanned {
 				counters.filesScanned.Add(1)
 				if result.capped {

@@ -3,7 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +72,226 @@ func TestRunJSONWithNoCertificates(t *testing.T) {
 	}
 	if strings.TrimSpace(stdout.String()) != "[]" {
 		t.Fatalf("empty JSON output = %q, want []", stdout.String())
+	}
+}
+
+func TestRunJSONRemainsASortedArray(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	now := time.Now()
+	zPath := writeTestCertificate(t, directory, "z.pem", now.Add(-time.Hour), now.Add(time.Hour), x509.ExtKeyUsageServerAuth)
+	aPath := writeTestCertificate(t, directory, "a.pem", now.Add(-time.Hour), now.Add(time.Hour), x509.ExtKeyUsageServerAuth)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	status := run(context.Background(), []string{"-json", "-quiet", directory}, &stdout, &stderr)
+	if status != exitSuccess {
+		t.Fatalf("JSON status = %d; stderr = %q", status, stderr.String())
+	}
+	var certificates []jsonCertificate
+	if err := json.Unmarshal(stdout.Bytes(), &certificates); err != nil {
+		t.Fatalf("JSON array is invalid: %v; output = %q", err, stdout.String())
+	}
+	if len(certificates) != 2 || certificates[0].Path != aPath || certificates[1].Path != zPath {
+		t.Fatalf("JSON paths = %+v, want %s then %s", certificates, aPath, zPath)
+	}
+	if !strings.HasPrefix(stdout.String(), "[\n") {
+		t.Fatalf("JSON output is not an indented array: %q", stdout.String())
+	}
+}
+
+func TestRunJSONLinesEmitsOneCompactObjectPerCertificate(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	now := time.Now()
+	wantPaths := map[string]bool{
+		writeTestCertificate(t, directory, "first.pem", now.Add(-time.Hour), now.Add(time.Hour), x509.ExtKeyUsageServerAuth):    true,
+		writeTestCertificate(t, directory, "second.pem", now.Add(-time.Hour), now.Add(2*time.Hour), x509.ExtKeyUsageClientAuth): true,
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	status := run(context.Background(), []string{"-jsonl", directory}, &stdout, &stderr)
+	if status != exitSuccess {
+		t.Fatalf("JSON Lines status = %d; stderr = %q", status, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != len(wantPaths) {
+		t.Fatalf("JSON Lines output has %d lines, want %d: %q", len(lines), len(wantPaths), stdout.String())
+	}
+	for _, line := range lines {
+		if strings.Contains(line, "\n") || !json.Valid([]byte(line)) {
+			t.Fatalf("JSON Lines record is not compact valid JSON: %q", line)
+		}
+		var certificate jsonCertificate
+		if err := json.Unmarshal([]byte(line), &certificate); err != nil {
+			t.Fatal(err)
+		}
+		if !wantPaths[certificate.Path] {
+			t.Errorf("unexpected JSON Lines certificate path %q", certificate.Path)
+		}
+		delete(wantPaths, certificate.Path)
+	}
+	if len(wantPaths) != 0 {
+		t.Fatalf("JSON Lines output omitted paths %v", wantPaths)
+	}
+	if !strings.Contains(stderr.String(), "output=jsonl") {
+		t.Fatalf("startup output %q does not identify JSON Lines mode", stderr.String())
+	}
+}
+
+func TestRunJSONLinesWithNoCertificatesIsEmpty(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	status := run(context.Background(), []string{"-jsonl", "-quiet", t.TempDir()}, &stdout, &stderr)
+	if status != exitSuccess {
+		t.Fatalf("empty JSON Lines status = %d; stderr = %q", status, stderr.String())
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("empty quiet JSON Lines output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunJSONLinesWriteFailureIsRuntimeError(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	now := time.Now()
+	writeTestCertificate(t, directory, "certificate.pem", now.Add(-time.Hour), now.Add(time.Hour), x509.ExtKeyUsageServerAuth)
+	var stderr bytes.Buffer
+	status := run(context.Background(), []string{"-jsonl", "-quiet", directory}, errorWriter{}, &stderr)
+	if status != exitRuntimeError {
+		t.Fatalf("JSON Lines write-failure status = %d, want %d", status, exitRuntimeError)
+	}
+	if !strings.Contains(stderr.String(), `level=ERROR msg="write JSON Lines"`) {
+		t.Fatalf("JSON Lines write-failure log = %q", stderr.String())
+	}
+}
+
+func TestRunRejectsConflictingJSONModes(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	status := run(context.Background(), []string{"-json", "-jsonl", t.TempDir()}, &stdout, &stderr)
+	if status != exitUsageError {
+		t.Fatalf("conflicting JSON status = %d, want %d", status, exitUsageError)
+	}
+	if !strings.Contains(stderr.String(), `options=json,jsonl`) {
+		t.Fatalf("conflicting JSON log = %q", stderr.String())
+	}
+}
+
+func TestRunQuietSuppressesProgressButPreservesErrors(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	status := run(context.Background(), []string{"-quiet", t.TempDir()}, &stdout, &stderr)
+	if status != exitSuccess || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("quiet scan status=%d stdout=%q stderr=%q", status, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	missing := filepath.Join(t.TempDir(), "missing")
+	status = run(context.Background(), []string{"-quiet", missing}, &stdout, &stderr)
+	if status != exitRuntimeError {
+		t.Fatalf("quiet failed scan status = %d, want %d", status, exitRuntimeError)
+	}
+	if !strings.Contains(stderr.String(), `level=ERROR msg="scan failed"`) {
+		t.Fatalf("quiet failed scan did not preserve its error: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "certfinder dev") || strings.Contains(stderr.String(), "Scan stopped") {
+		t.Fatalf("quiet failed scan emitted progress: %q", stderr.String())
+	}
+}
+
+func TestRunMonitoringExitStatuses(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	tests := []struct {
+		name       string
+		notAfter   time.Time
+		usage      x509.ExtKeyUsage
+		options    []string
+		wantStatus int
+	}{
+		{
+			name:       "expired shortcut finds expired",
+			notAfter:   now.Add(-time.Hour),
+			usage:      x509.ExtKeyUsageServerAuth,
+			options:    []string{"-fail-expired"},
+			wantStatus: exitOperationalFinding,
+		},
+		{
+			name:       "expired shortcut accepts valid",
+			notAfter:   now.Add(24 * time.Hour),
+			usage:      x509.ExtKeyUsageServerAuth,
+			options:    []string{"-fail-expired"},
+			wantStatus: exitSuccess,
+		},
+		{
+			name:       "expiration window finds soon expiration",
+			notAfter:   now.Add(12 * time.Hour),
+			usage:      x509.ExtKeyUsageServerAuth,
+			options:    []string{"-fail-expiring=24h"},
+			wantStatus: exitOperationalFinding,
+		},
+		{
+			name:       "expiration window accepts later expiration",
+			notAfter:   now.Add(48 * time.Hour),
+			usage:      x509.ExtKeyUsageServerAuth,
+			options:    []string{"-fail-expiring=24h"},
+			wantStatus: exitSuccess,
+		},
+		{
+			name:       "expiration window includes expired",
+			notAfter:   now.Add(-time.Hour),
+			usage:      x509.ExtKeyUsageServerAuth,
+			options:    []string{"-fail-expiring=24h"},
+			wantStatus: exitOperationalFinding,
+		},
+		{
+			name:       "usage filter narrows monitoring scope",
+			notAfter:   now.Add(-time.Hour),
+			usage:      x509.ExtKeyUsageServerAuth,
+			options:    []string{"-usage=client", "-fail-expired"},
+			wantStatus: exitSuccess,
+		},
+		{
+			name:       "expiration filter narrows monitoring scope",
+			notAfter:   now.Add(48 * time.Hour),
+			usage:      x509.ExtKeyUsageServerAuth,
+			options:    []string{"-expiration=24h", "-fail-expiring=72h"},
+			wantStatus: exitSuccess,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			directory := t.TempDir()
+			writeTestCertificate(t, directory, "certificate.pem", now.Add(-24*time.Hour), test.notAfter, test.usage)
+			arguments := append(append([]string{}, test.options...), "-quiet", directory)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			status := run(context.Background(), arguments, &stdout, &stderr)
+			if status != test.wantStatus {
+				t.Fatalf("status = %d, want %d; stdout=%q stderr=%q", status, test.wantStatus, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunRejectsInvalidMonitoringOptions(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	for _, arguments := range [][]string{
+		{"-fail-expired", "-fail-expiring=0d", directory},
+		{"-fail-expiring=-1h", directory},
+		{"-fail-expiring=tomorrow", directory},
+	} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if status := run(context.Background(), arguments, &stdout, &stderr); status != exitUsageError {
+			t.Fatalf("run(%v) status = %d, want %d", arguments, status, exitUsageError)
+		}
 	}
 }
 
@@ -130,6 +359,49 @@ func TestRunIgnoreErrorsControlsExitStatus(t *testing.T) {
 			wantIgnored := fmt.Sprintf("ignored=%t", test.ignored)
 			if !strings.Contains(stderr.String(), wantIgnored) {
 				t.Fatalf("warning %q does not contain %q", stderr.String(), wantIgnored)
+			}
+		})
+	}
+}
+
+func TestRunRuntimeErrorsTakePrecedenceOverOperationalFindings(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	now := time.Now()
+	writeTestCertificate(t, root, "expired.pem", now.Add(-24*time.Hour), now.Add(-time.Hour), x509.ExtKeyUsageServerAuth)
+	if err := os.Symlink(filepath.Join(root, "missing.pem"), filepath.Join(root, "broken.pem")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	for _, test := range []struct {
+		name       string
+		options    []string
+		wantStatus int
+	}{
+		{
+			name:       "scan error",
+			options:    []string{"-quiet", "-follow-symlinks", "-fail-expired"},
+			wantStatus: exitRuntimeError,
+		},
+		{
+			name:       "ignored scan error",
+			options:    []string{"-quiet", "-follow-symlinks", "-ignore-errors", "-fail-expired"},
+			wantStatus: exitOperationalFinding,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			arguments := append(append([]string{}, test.options...), root)
+			if status := run(context.Background(), arguments, &stdout, &stderr); status != test.wantStatus {
+				t.Fatalf("status = %d, want %d; stderr = %q", status, test.wantStatus, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), `level=WARN msg="path scan failed"`) {
+				t.Fatalf("quiet mode suppressed warning: %q", stderr.String())
+			}
+			if strings.Contains(stderr.String(), "certfinder dev") || strings.Contains(stderr.String(), "Scan complete") {
+				t.Fatalf("quiet mode emitted progress: %q", stderr.String())
 			}
 		})
 	}
@@ -340,4 +612,43 @@ func TestPrintJSON(t *testing.T) {
 			t.Fatalf("JSON output %q does not contain %q", output.String(), want)
 		}
 	}
+}
+
+func writeTestCertificate(
+	t *testing.T,
+	directory string,
+	name string,
+	notBefore time.Time,
+	notAfter time.Time,
+	usage x509.ExtKeyUsage,
+) string {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(notAfter.UnixNano()),
+		Subject:      pkix.Name{CommonName: name},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{usage},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	certificatePath := filepath.Join(directory, name)
+	if err := os.WriteFile(certificatePath, certificatePEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certificatePath
+}
+
+type errorWriter struct{}
+
+func (errorWriter) Write([]byte) (int, error) {
+	return 0, io.ErrClosedPipe
 }
