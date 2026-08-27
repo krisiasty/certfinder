@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -152,6 +153,47 @@ func TestRunJSONLinesWithNoCertificatesIsEmpty(t *testing.T) {
 	}
 	if stdout.Len() != 0 || stderr.Len() != 0 {
 		t.Fatalf("empty quiet JSON Lines output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunReportsEncryptedPKCS12InEveryOutputMode(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "encrypted.p12")
+	writeEncryptedPKCS12Fixture(t, path)
+
+	for _, test := range []struct {
+		name      string
+		arguments []string
+	}{
+		{name: "text", arguments: []string{"-quiet", "-usage=server", directory}},
+		{name: "JSON", arguments: []string{"-quiet", "-json", "-usage=server", directory}},
+		{name: "JSON Lines", arguments: []string{"-quiet", "-jsonl", "-usage=server", directory}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if status := run(context.Background(), test.arguments, &stdout, &stderr); status != exitSuccess {
+				t.Fatalf("status = %d; stderr = %q", status, stderr.String())
+			}
+			for _, wanted := range []string{path, "encrypted", "PBES2", "1.2.840.113549.1.5.13"} {
+				if !strings.Contains(stdout.String(), wanted) {
+					t.Errorf("output %q does not contain %q", stdout.String(), wanted)
+				}
+			}
+			if test.name != "text" {
+				trimmed := bytes.TrimSpace(stdout.Bytes())
+				if test.name == "JSON" {
+					var records []jsonPKCS12EncryptedContent
+					if err := json.Unmarshal(trimmed, &records); err != nil || len(records) != 1 {
+						t.Fatalf("JSON records=%+v err=%v output=%q", records, err, stdout.String())
+					}
+				} else if !json.Valid(trimmed) {
+					t.Fatalf("JSON Lines record is invalid: %q", stdout.String())
+				}
+			}
+		})
 	}
 }
 
@@ -831,6 +873,36 @@ func TestPrintCertificateIncludesIssuerAndValidity(t *testing.T) {
 	}
 }
 
+func TestPrintCertificateIncludesPKCS12FriendlyName(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	now := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	certificate := scanner.Certificate{
+		Path:      "/certificates/service.p12",
+		NotBefore: now.Add(-time.Hour),
+		NotAfter:  now.Add(time.Hour),
+		Keystore: &scanner.KeystoreInfo{
+			Format:       scanner.KeystoreFormatPKCS12,
+			FriendlyName: "service-é😀",
+			EntryType:    scanner.KeystoreEntryPKCS12CertBag,
+			ChainIndex:   1,
+		},
+	}
+	if err := printCertificateAt(&output, certificate, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, wanted := range []string{
+		"Keystore format: PKCS#12",
+		`Keystore friendly name: "service-é😀"`,
+		"Keystore entry type: certBag",
+		"Keystore chain index: 1",
+	} {
+		if !strings.Contains(output.String(), wanted) {
+			t.Errorf("output %q does not contain %q", output.String(), wanted)
+		}
+	}
+}
+
 func TestParseExpiration(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -994,6 +1066,66 @@ func writeTestCertificate(
 ) string {
 	t.Helper()
 	return writeTestCertificateWithSANs(t, directory, name, notBefore, notAfter, usage, nil, nil)
+}
+
+func writeEncryptedPKCS12Fixture(t *testing.T, path string) {
+	t.Helper()
+	dataOID := asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 1}
+	encryptedDataOID := asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 6}
+	pbes2OID := asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 5, 13}
+	algorithm := mainTestDERWrap(
+		0x30,
+		append(mainTestDER(t, pbes2OID), mainTestDER(t, asn1.RawValue{Tag: asn1.TagNull})...),
+	)
+	encryptedContentInfo := mainTestDERWrap(
+		0x30,
+		bytes.Join([][]byte{
+			mainTestDER(t, dataOID),
+			algorithm,
+			mainTestDERWrap(0x80, []byte{0xde, 0xad, 0xbe, 0xef}),
+		}, nil),
+	)
+	encryptedData := mainTestDERWrap(0x30, append(mainTestDER(t, 0), encryptedContentInfo...))
+	innerContentInfo := mainTestContentInfo(t, encryptedDataOID, encryptedData)
+	authenticatedSafe := mainTestDERWrap(0x30, innerContentInfo)
+	authSafeContentInfo := mainTestContentInfo(t, dataOID, mainTestDER(t, authenticatedSafe))
+	pfx := mainTestDERWrap(0x30, append(mainTestDER(t, 3), authSafeContentInfo...))
+	if err := os.WriteFile(path, pfx, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mainTestContentInfo(t *testing.T, contentType asn1.ObjectIdentifier, content []byte) []byte {
+	t.Helper()
+	return mainTestDERWrap(0x30, append(mainTestDER(t, contentType), mainTestDERWrap(0xa0, content)...))
+}
+
+func mainTestDER(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := asn1.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func mainTestDERWrap(tag byte, content []byte) []byte {
+	result := []byte{tag}
+	length := len(content)
+	if length < 128 {
+		result = append(result, byte(length))
+	} else {
+		var encoded [8]byte
+		index := len(encoded)
+		for length > 0 {
+			index--
+			encoded[index] = byte(length)
+			length >>= 8
+		}
+		result = append(result, 0x80|byte(len(encoded)-index))
+		result = append(result, encoded[index:]...)
+	}
+	return append(result, content...)
 }
 
 func writeTestCertificateWithSANs(

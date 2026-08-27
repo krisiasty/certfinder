@@ -100,3 +100,36 @@ func TestProgressDisplayQuietModeSuppressesProgressOnly(t *testing.T) {
 		t.Fatalf("quiet certificate output = %q", certificateOutput.String())
 	}
 }
+
+func TestProgressDisplayReportsEncryptedPKCS12Content(t *testing.T) {
+	t.Parallel()
+	var progressOutput bytes.Buffer
+	var resultOutput bytes.Buffer
+	display := newProgressDisplay(&progressOutput, &resultOutput, true, false)
+	display.Start(scanConfiguration{Path: ".", Workers: 1})
+	finding := scanner.PKCS12EncryptedContent{
+		Path: "/certificates/service.p12", ContentIndex: 2, Algorithm: "PBES2",
+		AlgorithmOID: "1.2.840.113549.1.5.13",
+	}
+	display.Update(scanner.Progress{
+		FilesDiscovered: 1, FilesScanned: 1, PKCS12Encrypted: 1, DiscoveryComplete: true,
+	})
+	display.PKCS12Encrypted(finding)
+	display.Stop(true)
+	if err := display.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(progressOutput.String(), "1 encrypted PKCS#12 content;") {
+		t.Fatalf("progress output = %q", progressOutput.String())
+	}
+	for _, wanted := range []string{
+		"/certificates/service.p12 [PKCS#12 content 2]",
+		"certificates are unreadable without a password",
+		"PBE algorithm: PBES2 (1.2.840.113549.1.5.13)",
+		"Bag count: unknown",
+	} {
+		if !strings.Contains(resultOutput.String(), wanted) {
+			t.Errorf("result output %q does not contain %q", resultOutput.String(), wanted)
+		}
+	}
+}
