@@ -48,6 +48,36 @@ func TestDuplicateCertificateGroups(t *testing.T) {
 	}
 }
 
+func TestGroupCertificatesPreservesKeystoreLocations(t *testing.T) {
+	t.Parallel()
+	certificates := []scanner.Certificate{
+		{
+			Path: "/store.jks", Index: 0, SHA256Fingerprint: "same",
+			Keystore: &scanner.KeystoreInfo{
+				Format: scanner.KeystoreFormatJKS, Alias: "first", EntryType: scanner.KeystoreEntryPrivateKey,
+			},
+		},
+		{
+			Path: "/store.jks", Index: 1, SHA256Fingerprint: "same",
+			Keystore: &scanner.KeystoreInfo{
+				Format: scanner.KeystoreFormatJKS, Alias: "second", EntryType: scanner.KeystoreEntryTrustedCert,
+				Truststore: true,
+			},
+		},
+	}
+	groups := groupCertificates(certificates)
+	if len(groups) != 1 || len(groups[0].Locations) != 2 {
+		t.Fatalf("groups = %+v, want one fingerprint at two keystore locations", groups)
+	}
+	if groups[0].Locations[0].Keystore == nil || groups[0].Locations[0].Keystore.Alias != "first" {
+		t.Errorf("first location = %+v, want alias first", groups[0].Locations[0])
+	}
+	if groups[0].Locations[1].Keystore == nil || groups[0].Locations[1].Keystore.Alias != "second" ||
+		!groups[0].Locations[1].Keystore.Truststore {
+		t.Errorf("second location = %+v, want trusted alias second", groups[0].Locations[1])
+	}
+}
+
 func TestSummarizeCertificateIdentities(t *testing.T) {
 	t.Parallel()
 	summary := summarizeCertificateIdentities(map[string]int64{"a": 3, "b": 1})
@@ -67,15 +97,30 @@ func TestGroupedOutputIncludesAllLocations(t *testing.T) {
 			SHA256Fingerprint: "aabbcc",
 			NotBefore:         now.Add(-time.Hour),
 			NotAfter:          now.Add(time.Hour),
+			Keystore: &scanner.KeystoreInfo{
+				Format: scanner.KeystoreFormatJKS, Alias: "service", EntryType: scanner.KeystoreEntryPrivateKey,
+			},
 		},
-		Locations: []certificateLocation{{Path: "/a.pem", Index: 0}, {Path: "/bundle.pem", Index: 2}},
+		Locations: []certificateLocation{
+			{
+				Path: "/a.pem", Index: 0,
+				Keystore: &jsonKeystoreInfo{
+					Format: scanner.KeystoreFormatJKS, Alias: "service", EntryType: scanner.KeystoreEntryPrivateKey,
+				},
+			},
+			{Path: "/bundle.pem", Index: 2},
+		},
 	}
 
 	var textOutput bytes.Buffer
 	if err := printCertificateGroupAt(&textOutput, group, now); err != nil {
 		t.Fatal(err)
 	}
-	for _, wanted := range []string{"Locations (2):", "/a.pem [index 0]", "/bundle.pem [index 2]"} {
+	for _, wanted := range []string{
+		"Locations (2):",
+		`/a.pem [index 0] [keystore JKS; alias "service"; entry type PrivateKeyEntry; chain index 0; truststore false]`,
+		"/bundle.pem [index 2]",
+	} {
 		if !strings.Contains(textOutput.String(), wanted) {
 			t.Errorf("text output %q does not contain %q", textOutput.String(), wanted)
 		}
@@ -92,7 +137,10 @@ func TestGroupedOutputIncludesAllLocations(t *testing.T) {
 	if len(decoded) != 1 || len(decoded[0].Locations) != 2 {
 		t.Fatalf("JSON groups = %+v, want one group with two locations", decoded)
 	}
-	if decoded[0].Certificate.Path != "" || decoded[0].Certificate.Index != nil {
+	if decoded[0].Certificate.Path != "" || decoded[0].Certificate.Index != nil || decoded[0].Certificate.Keystore != nil {
 		t.Errorf("grouped JSON contains an ambiguous representative location: %s", jsonOutput.String())
+	}
+	if decoded[0].Locations[0].Keystore == nil || decoded[0].Locations[0].Keystore.Alias != "service" {
+		t.Errorf("grouped JSON location lost keystore metadata: %s", jsonOutput.String())
 	}
 }

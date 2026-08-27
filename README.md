@@ -1,7 +1,8 @@
 # certfinder
 
-`certfinder` recursively finds PEM and DER encoded X.509 certificates and reports each certificate's file,
-identity, purpose, cryptographic properties, certificate and SPKI fingerprints, and validity state.
+`certfinder` recursively finds PEM and DER encoded X.509 certificates, including certificates inside JKS and JCEKS
+keystores, and reports each certificate's file, identity, purpose, cryptographic properties, certificate and SPKI
+fingerprints, and validity state.
 
 It uses only the Go standard library.
 
@@ -62,13 +63,64 @@ The default scan initially reads at most the first 64 KiB of every regular file.
 large images, archives, databases, logs, and other unrelated data. If that prefix contains a valid PEM certificate,
 `certfinder` rereads and parses the complete file so certificate bundles are never reported partially. Set
 `-max-bytes 0` to inspect every file completely, or choose a larger positive sniffing limit when a certificate may
-first appear later in a file.
+first appear later in a file. A JKS or JCEKS magic number at offset zero also triggers a complete reread.
 
 There is an unavoidable tradeoff: no scanner can prove that an arbitrary file does not contain an embedded
 certificate without inspecting the complete file. With a positive limit, `certfinder` may therefore miss a file
 whose first PEM certificate is located after that limit. A DER certificate is recognized only when the complete
 file fits within the limit because DER has no reliable text marker and parsing arbitrary binary offsets would
 produce expensive false candidates.
+
+## Java keystores
+
+JKS and JCEKS containers are detected only by their four-byte big-endian magic numbers, `FE ED FE ED` and
+`CE CE CE CE`. File extensions do not affect format detection: `.jks`, `.p12`, `.keystore`, misleading extensions,
+and extensionless paths are treated identically. The optional `-extensions` traversal filter still runs first as a
+separate filename-based restriction.
+
+No password or JDK is required. `certfinder` reads the container structure, skips each encrypted private-key blob by
+its declared length, and passes only contained DER certificate bytes to Go's X.509 parser. It never invokes `keytool`
+and never parses, decrypts, fingerprints, or emits private-key material. JKS/JCEKS versions 1 and 2 are supported.
+JCEKS secret-key entries use Java object serialization and are reported as unsupported because they contain no
+certificate chain and cannot be skipped safely without parsing the serialized object graph.
+
+Each contained certificate reports the keystore format, modified UTF-8 alias, entry type, and zero-based chain index.
+`PrivateKeyEntry` identifies a certificate structurally associated with a private key; `trustedCertEntry` identifies
+a certificate the store trusts. The ordinary file-wide `index` remains unique within the containing file.
+
+```text
+/srv/app/keystore [index 0]
+  Keystore format: JKS
+  Keystore alias: "service"
+  Keystore entry type: PrivateKeyEntry
+  Keystore chain index: 0
+  Truststore: no
+```
+
+JSON and JSON Lines expose the same information in a `keystore` object:
+
+```json
+{
+  "keystore": {
+    "format": "JKS",
+    "alias": "service",
+    "entry_type": "PrivateKeyEntry",
+    "chain_index": 0,
+    "truststore": false
+  }
+}
+```
+
+The trailing SHA-1 integrity MAC is deliberately not verified because doing so requires the store password. A wrong
+or stale MAC therefore never suppresses certificates or fails a scan. Structural lengths remain strictly bounded by
+the file, and malformed, truncated, zero-entry, or unsupported stores produce controlled path warnings. Certificates
+parsed before a later structural error remain available; use `-ignore-errors` when such warnings should not affect the
+exit status.
+
+A store containing trusted-certificate entries and no private-key entries is marked heuristically as a truststore.
+Truststore certificates are not silently discarded. Use `-exclude` for known truststore paths, `-unique` to collapse
+repeated certificates, or JSON processing on `keystore.truststore` and `keystore.entry_type` to control large JDK
+`cacerts` inventories. Duplicate grouping retains alias, entry type, chain index, and truststore state per location.
 
 Use `-usage` to select certificates that support a particular extended key usage. Common values are `server`,
 `client`, `code-signing`, `email-protection`, `timestamping`, and `ocsp-signing`. The IPsec and Microsoft/Netscape
