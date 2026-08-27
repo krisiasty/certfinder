@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -35,8 +37,15 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	flags := flag.NewFlagSet("certfinder", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	var excludes excludeFlag
+	var extensions extensionFlag
 	maxBytes := flags.Int64("max-bytes", scanner.DefaultMaxBytes, "initial bytes inspected per file; PEM matches are read fully; 0 reads all files fully")
 	workers := flags.Int("workers", min(runtime.GOMAXPROCS(0), 8), "number of files scanned concurrently")
+	flags.Var(&excludes, "exclude", "exclude a relative path glob; repeatable; patterns without / match at any depth")
+	flags.Var(&extensions, "extensions", "scan only these file extensions; comma-separated or repeatable")
+	oneFileSystem := flags.Bool("one-file-system", false, "do not scan files or directories on other filesystems (Linux and macOS)")
+	followSymlinks := flags.Bool("follow-symlinks", false, "follow symlinks encountered below PATH while preventing cycles")
+	ignoreErrors := flags.Bool("ignore-errors", false, "return success despite non-fatal file scan errors")
 	usageValue := flags.String("usage", "", "filter by extended key usage, such as server or client")
 	expired := flags.Bool("expired", false, "shortcut for -expiration=0d")
 	expirationValue := flags.String("expiration", "", "print certificates expired or expiring within a duration, such as 30d")
@@ -99,18 +108,27 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	now := time.Now()
 	display := newProgressDisplay(stderr, stdout, !*jsonOutput)
 	display.Start(scanConfiguration{
-		Path:       flags.Arg(0),
-		Workers:    *workers,
-		MaxBytes:   *maxBytes,
-		Usage:      usage,
-		Expiration: expirationDescription,
-		JSON:       *jsonOutput,
+		Path:           flags.Arg(0),
+		Workers:        *workers,
+		MaxBytes:       *maxBytes,
+		Exclude:        append([]string{}, excludes...),
+		Extensions:     append([]string{}, extensions...),
+		OneFileSystem:  *oneFileSystem,
+		FollowSymlinks: *followSymlinks,
+		IgnoreErrors:   *ignoreErrors,
+		Usage:          usage,
+		Expiration:     expirationDescription,
+		JSON:           *jsonOutput,
 	})
 
 	report, err := scanner.Scan(ctx, flags.Arg(0), scanner.Options{
-		MaxBytes:   *maxBytes,
-		Workers:    *workers,
-		OnProgress: display.Update,
+		MaxBytes:       *maxBytes,
+		Workers:        *workers,
+		Exclude:        append([]string{}, excludes...),
+		Extensions:     append([]string{}, extensions...),
+		OneFileSystem:  *oneFileSystem,
+		FollowSymlinks: *followSymlinks,
+		OnProgress:     display.Update,
 		OnCertificate: func(certificate scanner.Certificate) {
 			if certificateMatches(certificate, usage, expiration, hasExpiration, now) {
 				display.Certificate(certificate)
@@ -142,12 +160,56 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	}
 
 	for _, scanErr := range report.Errors {
-		logger.Warn("file scan failed", "path", scanErr.Path, "error", scanErr.Err)
+		logger.Warn("path scan failed", "path", scanErr.Path, "error", scanErr.Err, "ignored", *ignoreErrors)
 	}
-	if len(report.Errors) > 0 {
+	if len(report.Errors) > 0 && !*ignoreErrors {
 		return 1
 	}
 	return 0
+}
+
+type excludeFlag []string
+
+func (values *excludeFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *excludeFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "./")
+	value = strings.TrimRight(value, "/")
+	if value == "" || path.IsAbs(value) || filepath.IsAbs(value) {
+		return errors.New("use a non-empty relative glob")
+	}
+	if _, err := path.Match(value, ""); err != nil {
+		return fmt.Errorf("invalid glob %q: %w", value, err)
+	}
+	if !contains(*values, value) {
+		*values = append(*values, value)
+	}
+	return nil
+}
+
+type extensionFlag []string
+
+func (values *extensionFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *extensionFlag) Set(value string) error {
+	for _, extension := range strings.Split(value, ",") {
+		extension = strings.ToLower(strings.TrimSpace(extension))
+		if extension == "" || extension == "." || strings.ContainsAny(extension, `/*?[]\\`) {
+			return fmt.Errorf("invalid extension %q", extension)
+		}
+		if !strings.HasPrefix(extension, ".") {
+			extension = "." + extension
+		}
+		if !contains(*values, extension) {
+			*values = append(*values, extension)
+		}
+	}
+	return nil
 }
 
 func printCertificate(output io.Writer, certificate scanner.Certificate) error {

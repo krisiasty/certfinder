@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +77,77 @@ func TestRunRejectsConflictingExpirationFilters(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), `level=ERROR msg="conflicting options"`) {
 		t.Fatalf("conflicting-filter log = %q", stderr.String())
+	}
+}
+
+func TestRunDisplaysTraversalOptions(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	status := run(context.Background(), []string{
+		"-exclude=.git",
+		"-exclude=cache",
+		"-extensions=pem,CRT",
+		"-follow-symlinks",
+		"-ignore-errors",
+		t.TempDir(),
+	}, &stdout, &stderr)
+	if status != 0 {
+		t.Fatalf("traversal-options status = %d; stderr = %q", status, stderr.String())
+	}
+	want := "Traversal: exclude=.git,cache extensions=.pem,.crt one-file-system=false follow-symlinks=true ignore-errors=true\n"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("startup output %q does not contain %q", stderr.String(), want)
+	}
+}
+
+func TestRunIgnoreErrorsControlsExitStatus(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.Symlink(filepath.Join(root, "missing.pem"), filepath.Join(root, "broken.pem")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	for _, test := range []struct {
+		name       string
+		arguments  []string
+		wantStatus int
+		ignored    bool
+	}{
+		{name: "failure", arguments: []string{"-follow-symlinks", root}, wantStatus: 1},
+		{name: "ignored", arguments: []string{"-follow-symlinks", "-ignore-errors", root}, wantStatus: 0, ignored: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if status := run(context.Background(), test.arguments, &stdout, &stderr); status != test.wantStatus {
+				t.Fatalf("status = %d, want %d; stderr = %q", status, test.wantStatus, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "1 error") {
+				t.Fatalf("summary %q does not retain the error count", stderr.String())
+			}
+			wantIgnored := fmt.Sprintf("ignored=%t", test.ignored)
+			if !strings.Contains(stderr.String(), wantIgnored) {
+				t.Fatalf("warning %q does not contain %q", stderr.String(), wantIgnored)
+			}
+		})
+	}
+}
+
+func TestRunRejectsInvalidTraversalFlags(t *testing.T) {
+	t.Parallel()
+	for _, arguments := range [][]string{
+		{"-exclude=[", "."},
+		{"-extensions=", "."},
+		{"-extensions=path/cert", "."},
+		{"-extensions=*.pem", "."},
+	} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if status := run(context.Background(), arguments, &stdout, &stderr); status != 2 {
+			t.Fatalf("run(%v) status = %d, want 2", arguments, status)
+		}
 	}
 }
 

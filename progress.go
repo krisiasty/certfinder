@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,12 +20,17 @@ const (
 )
 
 type scanConfiguration struct {
-	Path       string
-	Workers    int
-	MaxBytes   int64
-	Usage      string
-	Expiration string
-	JSON       bool
+	Path           string
+	Workers        int
+	MaxBytes       int64
+	Exclude        []string
+	Extensions     []string
+	OneFileSystem  bool
+	FollowSymlinks bool
+	IgnoreErrors   bool
+	Usage          string
+	Expiration     string
+	JSON           bool
 }
 
 type progressDisplay struct {
@@ -86,12 +92,27 @@ func (display *progressDisplay) Start(configuration scanConfiguration) {
 		expiration,
 		output,
 	)
+	display.writeProgress(
+		"Traversal: exclude=%s extensions=%s one-file-system=%t follow-symlinks=%t ignore-errors=%t\n",
+		formatOptionList(configuration.Exclude, "none"),
+		formatOptionList(configuration.Extensions, "all"),
+		configuration.OneFileSystem,
+		configuration.FollowSymlinks,
+		configuration.IgnoreErrors,
+	)
 	display.writeProgress("\n")
 	display.drawStatusLocked()
 	display.mu.Unlock()
 
 	display.wait.Add(1)
 	go display.refreshLoop()
+}
+
+func formatOptionList(values []string, empty string) string {
+	if len(values) == 0 {
+		return empty
+	}
+	return strings.Join(values, ",")
 }
 
 func (display *progressDisplay) Update(progress scanner.Progress) {
