@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/krisiasty/certfinder/internal/scanner"
@@ -107,19 +108,33 @@ func formatCertificateLocation(location certificateLocation) string {
 	if location.Keystore == nil {
 		return result
 	}
-	return fmt.Sprintf(
-		"%s [keystore %s; alias %q; entry type %s; chain index %d; truststore %t]",
-		result,
-		location.Keystore.Format,
-		location.Keystore.Alias,
-		location.Keystore.EntryType,
-		location.Keystore.ChainIndex,
-		location.Keystore.Truststore,
+	details := []string{"keystore " + location.Keystore.Format}
+	if location.Keystore.Alias != "" {
+		details = append(details, fmt.Sprintf("alias %q", location.Keystore.Alias))
+	}
+	if location.Keystore.FriendlyName != "" {
+		details = append(details, fmt.Sprintf("friendly name %q", location.Keystore.FriendlyName))
+	}
+	details = append(
+		details,
+		"entry type "+location.Keystore.EntryType,
+		fmt.Sprintf("chain index %d", location.Keystore.ChainIndex),
+		fmt.Sprintf("truststore %t", location.Keystore.Truststore),
 	)
+	return result + " [" + strings.Join(details, "; ") + "]"
 }
 
 func printJSONCertificateGroupsAt(output io.Writer, groups []certificateGroup, now time.Time) error {
-	result := make([]jsonCertificateGroup, 0, len(groups))
+	return printJSONCertificateGroupsAndPKCS12At(output, groups, nil, now)
+}
+
+func printJSONCertificateGroupsAndPKCS12At(
+	output io.Writer,
+	groups []certificateGroup,
+	encrypted []scanner.PKCS12EncryptedContent,
+	now time.Time,
+) error {
+	result := make([]any, 0, len(groups)+len(encrypted))
 	for _, group := range groups {
 		certificate := newJSONCertificate(group.Certificate, now)
 		certificate.Path = ""
@@ -129,6 +144,9 @@ func printJSONCertificateGroupsAt(output io.Writer, groups []certificateGroup, n
 			Certificate: certificate,
 			Locations:   append([]certificateLocation{}, group.Locations...),
 		})
+	}
+	for _, finding := range encrypted {
+		result = append(result, newJSONPKCS12EncryptedContent(finding))
 	}
 	encoder := json.NewEncoder(output)
 	encoder.SetIndent("", "  ")

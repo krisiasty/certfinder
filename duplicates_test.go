@@ -78,6 +78,27 @@ func TestGroupCertificatesPreservesKeystoreLocations(t *testing.T) {
 	}
 }
 
+func TestGroupCertificatesPreservesPKCS12FriendlyName(t *testing.T) {
+	t.Parallel()
+	groups := groupCertificates([]scanner.Certificate{{
+		Path: "/store.p12", SHA256Fingerprint: "same",
+		Keystore: &scanner.KeystoreInfo{
+			Format:       scanner.KeystoreFormatPKCS12,
+			FriendlyName: "service",
+			EntryType:    scanner.KeystoreEntryPKCS12CertBag,
+			ChainIndex:   1,
+		},
+	}})
+	if len(groups) != 1 || groups[0].Locations[0].Keystore == nil ||
+		groups[0].Locations[0].Keystore.FriendlyName != "service" {
+		t.Fatalf("groups = %+v", groups)
+	}
+	want := `/store.p12 [index 0] [keystore PKCS#12; friendly name "service"; entry type certBag; chain index 1; truststore false]`
+	if got := formatCertificateLocation(groups[0].Locations[0]); got != want {
+		t.Fatalf("formatted location = %q, want %q", got, want)
+	}
+}
+
 func TestSummarizeCertificateIdentities(t *testing.T) {
 	t.Parallel()
 	summary := summarizeCertificateIdentities(map[string]int64{"a": 3, "b": 1})

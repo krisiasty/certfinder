@@ -1,8 +1,8 @@
 # certfinder
 
-`certfinder` recursively finds PEM and DER encoded X.509 certificates, including certificates inside JKS and JCEKS
-keystores, and reports each certificate's file, identity, purpose, cryptographic properties, certificate and SPKI
-fingerprints, and validity state.
+`certfinder` recursively finds PEM and DER encoded X.509 certificates, including certificates inside JKS, JCEKS,
+and PKCS#12 keystores, and reports each certificate's file, identity, purpose, cryptographic properties, certificate
+and SPKI fingerprints, and validity state.
 
 It uses only the Go standard library.
 
@@ -63,7 +63,8 @@ The default scan initially reads at most the first 64 KiB of every regular file.
 large images, archives, databases, logs, and other unrelated data. If that prefix contains a valid PEM certificate,
 `certfinder` rereads and parses the complete file so certificate bundles are never reported partially. Set
 `-max-bytes 0` to inspect every file completely, or choose a larger positive sniffing limit when a certificate may
-first appear later in a file. A JKS or JCEKS magic number at offset zero also triggers a complete reread.
+first appear later in a file. A JKS/JCEKS magic number or structurally detected PKCS#12 PFX also triggers a complete
+reread.
 
 There is an unavoidable tradeoff: no scanner can prove that an arbitrary file does not contain an embedded
 certificate without inspecting the complete file. With a positive limit, `certfinder` may therefore miss a file
@@ -121,6 +122,56 @@ A store containing trusted-certificate entries and no private-key entries is mar
 Truststore certificates are not silently discarded. Use `-exclude` for known truststore paths, `-unique` to collapse
 repeated certificates, or JSON processing on `keystore.truststore` and `keystore.entry_type` to control large JDK
 `cacerts` inventories. Duplicate grouping retains alias, entry type, chain index, and truststore state per location.
+
+## PKCS#12 keystores
+
+PKCS#12 containers are detected from the outer DER ASN.1 structure: a version 3 `PFX` with an `authSafe`
+`ContentInfo`. Detection never uses `.p12`, `.pfx`, or any other extension, and a bare DER certificate remains on the
+ordinary DER path. Recognized containers are reread completely after the initial `-max-bytes` sniff.
+
+PKCS#12 differs from JKS because certificate bags are commonly encrypted. `certfinder` extracts X.509 `certBag`
+entries from plaintext `data` content, including stores produced with OpenSSL `-certpbe NONE`. It skips `keyBag`,
+`pkcs8ShroudedKeyBag`, and secret bags by their ASN.1 lengths without parsing, decrypting, fingerprinting, or emitting
+key material. Neither `openssl` nor `keytool` is invoked.
+
+Extracted certificates use the same `keystore` metadata shape as Java keystores. PKCS#12 adds `friendly_name` when
+the bag carries that attribute, reports `entry_type` as `certBag`, and uses `chain_index` for the zero-based
+certificate-bag position within its plaintext `SafeContents`. The file-wide `index` remains unique. Stores with
+plaintext certificates and no plaintext key bags or encrypted sections are marked heuristically as truststores.
+
+Encrypted `encryptedData` content is not silently skipped. No password input or decryption is implemented, including
+for an empty password; the scanner reports the content as present but unreadable and names its PBE algorithm. The bag
+count is `unknown`/`null` because it is inside the ciphertext. This is a successful scan result, not a malformed-file
+error. The optional PFX integrity MAC is not verified because no password is accepted:
+
+```text
+/srv/app/keystore.p12 [PKCS#12 content 0]
+  Status: encrypted; certificates are unreadable without a password
+  PBE algorithm: PBES2 (1.2.840.113549.1.5.13)
+  Bag count: unknown
+```
+
+JSON and JSON Lines emit a distinct record so encrypted content cannot be confused with a file containing no
+certificates:
+
+```json
+{
+  "record_type": "pkcs12_encrypted_content",
+  "path": "/srv/app/keystore.p12",
+  "pkcs12": {
+    "status": "encrypted",
+    "content_index": 0,
+    "algorithm": "PBES2",
+    "algorithm_oid": "1.2.840.113549.1.5.13",
+    "bag_count": null
+  }
+}
+```
+
+Certificate filters and `-unique`/`-duplicates` do not hide encrypted-content records because their certificate
+metadata and fingerprints are unavailable. Malformed or truncated PFX structures use the normal controlled warning
+path. `AuthenticatedSafe` content count, total bag count, and nested `safeContentsBag` depth are capped to bound
+hostile ASN.1 input. Certificates parsed before a later bag error remain available.
 
 Use `-usage` to select certificates that support a particular extended key usage. Common values are `server`,
 `client`, `code-signing`, `email-protection`, `timestamping`, and `ocsp-signing`. The IPsec and Microsoft/Netscape
@@ -234,20 +285,20 @@ an abridged duplicate record looks like this:
 
 At startup, `certfinder` writes its name, version, resolved scan path, worker count, and all effective scan and
 traversal options to stderr. A status line shows the number of files discovered and scanned, pending files,
-certificates found, and whether directory discovery is complete. The periodic status refresh is limited to once
-every five seconds. The final summary also reports how many files were stopped at the `-max-bytes` sniffing limit
-without triggering a full reread. Certificate identity counts are calculated after selection filters: `matched` is
-the number of matching occurrences, `unique` is the number of distinct SHA-256 fingerprints, and each occurrence
-after the first copy of a fingerprint is a `duplicate occurrence`.
+certificates found, encrypted PKCS#12 contents, and whether directory discovery is complete. The periodic status
+refresh is limited to once every five seconds. The final summary also reports how many files were stopped at the
+`-max-bytes` sniffing limit without triggering a full reread. Certificate identity counts are calculated after
+selection filters: `matched` is the number of matching occurrences, `unique` is the number of distinct SHA-256
+fingerprints, and each occurrence after the first copy of a fingerprint is a `duplicate occurrence`.
 
 While directory discovery is running, the discovered-file total can increase. This keeps scanning single-pass and
 avoids delaying the scan with a separate counting traversal. When a certificate is found in text mode, its details
 replace the current terminal status line and a fresh status line is drawn beneath it. When stderr is redirected,
 progress is emitted as ordinary lines without terminal control sequences.
 
-Progress and structured logs use stderr. Certificate text, JSON, and JSON Lines use stdout, so structured output
-remains suitable for piping to another program. `-quiet` suppresses startup information, progress updates, and the
-final summary while preserving certificate output, warnings, and errors.
+Progress and structured logs use stderr. Certificate and encrypted-content text, JSON, and JSON Lines use stdout, so
+structured output remains suitable for piping to another program. `-quiet` suppresses startup information, progress
+updates, and the final summary while preserving scan results, warnings, and errors.
 
 ## Output
 
@@ -313,11 +364,12 @@ certificate validation or other security decisions.
 By default, server, client, dual-purpose, and unspecified-purpose certificates are all included. Pass `-json` to
 emit the filtered results as a sorted JSON array with snake-case field names and RFC 3339 timestamps. Array output is
 written after scanning finishes and is convenient when one complete, deterministic JSON document is required.
+Certificate records retain sorted path/index order; encrypted PKCS#12 records follow in sorted path/content order.
 
-Pass `-jsonl` to emit each matching certificate immediately as one compact JSON object followed by a newline. JSON
-Lines output has no enclosing array, uses bounded certificate memory, and follows worker completion order rather than
-sorted path order. Complete lines remain usable if a scan is interrupted. A scan with no matches emits no JSON Lines
-records. `-json` and `-jsonl` cannot be combined.
+Pass `-jsonl` to emit each matching certificate or encrypted-content finding immediately as one compact JSON object
+followed by a newline. JSON Lines output has no enclosing array, uses bounded certificate memory, and follows worker
+completion order rather than sorted path order. Complete lines remain usable if a scan is interrupted. A scan with no
+results emits no JSON Lines records. `-json` and `-jsonl` cannot be combined.
 
 For example, use `jq '.[]' results.json` with array JSON and `jq '.' results.jsonl` with JSON Lines. Runtime errors and
 warnings use structured `slog` text records on stderr, so structured stdout remains valid.

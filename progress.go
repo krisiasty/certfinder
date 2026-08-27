@@ -40,7 +40,7 @@ type scanConfiguration struct {
 type progressDisplay struct {
 	progressOutput    io.Writer
 	certificateOutput io.Writer
-	showCertificates  bool
+	showResults       bool
 	quiet             bool
 	terminal          bool
 	started           time.Time
@@ -55,11 +55,11 @@ type progressDisplay struct {
 	wait               sync.WaitGroup
 }
 
-func newProgressDisplay(progressOutput, certificateOutput io.Writer, showCertificates, quiet bool) *progressDisplay {
+func newProgressDisplay(progressOutput, certificateOutput io.Writer, showResults, quiet bool) *progressDisplay {
 	return &progressDisplay{
 		progressOutput:    progressOutput,
 		certificateOutput: certificateOutput,
-		showCertificates:  showCertificates,
+		showResults:       showResults,
 		quiet:             quiet,
 		terminal:          isTerminal(progressOutput),
 		done:              make(chan struct{}),
@@ -153,26 +153,33 @@ func (display *progressDisplay) Update(progress scanner.Progress) {
 	display.progress.FilesScanned = max(display.progress.FilesScanned, progress.FilesScanned)
 	display.progress.FilesCapped = max(display.progress.FilesCapped, progress.FilesCapped)
 	display.progress.CertificatesFound = max(display.progress.CertificatesFound, progress.CertificatesFound)
+	display.progress.PKCS12Encrypted = max(display.progress.PKCS12Encrypted, progress.PKCS12Encrypted)
 	display.progress.ScanErrors = max(display.progress.ScanErrors, progress.ScanErrors)
 	display.progress.DiscoveryComplete = display.progress.DiscoveryComplete || progress.DiscoveryComplete
 }
 
 func (display *progressDisplay) Certificate(certificate scanner.Certificate) {
-	display.writeCertificate(func(output io.Writer) error {
+	display.writeResult(func(output io.Writer) error {
 		return printCertificate(output, certificate)
 	})
 }
 
 func (display *progressDisplay) CertificateGroup(group certificateGroup) {
-	display.writeCertificate(func(output io.Writer) error {
+	display.writeResult(func(output io.Writer) error {
 		return printCertificateGroupAt(output, group, time.Now())
 	})
 }
 
-func (display *progressDisplay) writeCertificate(printResult func(io.Writer) error) {
+func (display *progressDisplay) PKCS12Encrypted(finding scanner.PKCS12EncryptedContent) {
+	display.writeResult(func(output io.Writer) error {
+		return printPKCS12EncryptedContent(output, finding)
+	})
+}
+
+func (display *progressDisplay) writeResult(printResult func(io.Writer) error) {
 	display.mu.Lock()
 	defer display.mu.Unlock()
-	if display.stopped || !display.showCertificates {
+	if display.stopped || !display.showResults {
 		return
 	}
 	if !display.quiet && display.terminal {
@@ -230,8 +237,16 @@ func (display *progressDisplay) Stop(completed bool) {
 			plural(display.identitySummary.DuplicateOccurrences, "occurrence", "occurrences"),
 		)
 	}
+	pkcs12Summary := ""
+	if display.progress.PKCS12Encrypted > 0 {
+		pkcs12Summary = fmt.Sprintf(
+			" %d encrypted PKCS#12 %s;",
+			display.progress.PKCS12Encrypted,
+			plural(display.progress.PKCS12Encrypted, "content", "contents"),
+		)
+	}
 	display.writeProgress(
-		"%s: %d %s scanned, %d stopped at max-bytes; %d %s found;%s %d %s; elapsed %s\n",
+		"%s: %d %s scanned, %d stopped at max-bytes; %d %s found;%s%s %d %s; elapsed %s\n",
 		state,
 		display.progress.FilesScanned,
 		plural(display.progress.FilesScanned, "file", "files"),
@@ -239,6 +254,7 @@ func (display *progressDisplay) Stop(completed bool) {
 		display.progress.CertificatesFound,
 		plural(display.progress.CertificatesFound, "certificate", "certificates"),
 		identitySummary,
+		pkcs12Summary,
 		display.progress.ScanErrors,
 		plural(display.progress.ScanErrors, "error", "errors"),
 		elapsed,
@@ -287,6 +303,14 @@ func (display *progressDisplay) drawStatusLocked() {
 		plural(display.progress.CertificatesFound, "certificate", "certificates"),
 		discovery,
 	)
+	if display.progress.PKCS12Encrypted > 0 {
+		status = fmt.Sprintf(
+			"%s; %d encrypted PKCS#12 %s",
+			status,
+			display.progress.PKCS12Encrypted,
+			plural(display.progress.PKCS12Encrypted, "content", "contents"),
+		)
+	}
 	if display.terminal {
 		display.writeProgress("%s", status)
 		return

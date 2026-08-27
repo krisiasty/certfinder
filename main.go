@@ -56,7 +56,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	maxBytes := flags.Int64(
 		"max-bytes",
 		scanner.DefaultMaxBytes,
-		"initial bytes inspected per file; PEM and Java keystore matches are read fully; 0 reads all files fully",
+		"initial bytes inspected per file; PEM and keystore matches are read fully; 0 reads all files fully",
 	)
 	workers := flags.Int("workers", min(runtime.GOMAXPROCS(0), 8), "number of files scanned concurrently")
 	flags.Var(&excludes, "exclude", "exclude a relative path glob; repeatable; patterns without / match at any depth")
@@ -79,7 +79,10 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	version := flags.Bool("version", false, "show version and build information")
 	flags.Usage = func() {
 		_, _ = fmt.Fprintln(stderr, "Usage: certfinder [options] PATH")
-		_, _ = fmt.Fprintln(stderr, "Find X.509 certificates in PEM, DER, JKS, or JCEKS files in PATH and its subdirectories.")
+		_, _ = fmt.Fprintln(
+			stderr,
+			"Find X.509 certificates in PEM, DER, JKS, JCEKS, or PKCS#12 files in PATH and its subdirectories.",
+		)
 		_, _ = fmt.Fprintln(stderr)
 		flags.PrintDefaults()
 	}
@@ -212,14 +215,15 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		onProgress = display.Update
 	}
 	report, err := scanner.Scan(scanContext, flags.Arg(0), scanner.Options{
-		MaxBytes:            *maxBytes,
-		Workers:             *workers,
-		Exclude:             append([]string{}, excludes...),
-		Extensions:          append([]string{}, extensions...),
-		OneFileSystem:       *oneFileSystem,
-		FollowSymlinks:      *followSymlinks,
-		DiscardCertificates: !*jsonOutput && !groupedOutput,
-		OnProgress:          onProgress,
+		MaxBytes:               *maxBytes,
+		Workers:                *workers,
+		Exclude:                append([]string{}, excludes...),
+		Extensions:             append([]string{}, extensions...),
+		OneFileSystem:          *oneFileSystem,
+		FollowSymlinks:         *followSymlinks,
+		DiscardCertificates:    !*jsonOutput && !groupedOutput,
+		DiscardPKCS12Encrypted: !*jsonOutput,
+		OnProgress:             onProgress,
 		OnCertificate: func(certificate scanner.Certificate) {
 			if outputErr != nil || !certificateMatches(certificate, usage, hostnameFilter, expiration, hasExpiration, now) {
 				return
@@ -236,6 +240,20 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 				display.Certificate(certificate)
 			case outputJSONL:
 				outputErr = jsonLinesEncoder.Encode(newJSONCertificate(certificate, time.Now()))
+				if outputErr != nil {
+					cancelScan()
+				}
+			}
+		},
+		OnPKCS12Encrypted: func(finding scanner.PKCS12EncryptedContent) {
+			if outputErr != nil {
+				return
+			}
+			switch outputFormat {
+			case outputText:
+				display.PKCS12Encrypted(finding)
+			case outputJSONL:
+				outputErr = jsonLinesEncoder.Encode(newJSONPKCS12EncryptedContent(finding))
 				if outputErr != nil {
 					cancelScan()
 				}
@@ -283,9 +301,9 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	if *jsonOutput {
 		var err error
 		if groupedOutput {
-			err = printJSONCertificateGroupsAt(stdout, groups, time.Now())
+			err = printJSONCertificateGroupsAndPKCS12At(stdout, groups, report.PKCS12Encrypted, time.Now())
 		} else {
-			err = printJSONAt(stdout, filtered, time.Now())
+			err = printJSONResultsAt(stdout, filtered, report.PKCS12Encrypted, time.Now())
 		}
 		if err != nil {
 			logger.Error("write JSON", "error", err)
@@ -468,9 +486,14 @@ func printCertificateDetailsAt(output io.Writer, certificate scanner.Certificate
 
 	lines := make([]string, 0, 20)
 	if certificate.Keystore != nil {
+		lines = append(lines, "  Keystore format: "+certificate.Keystore.Format)
+		if certificate.Keystore.Alias != "" {
+			lines = append(lines, "  Keystore alias: "+strconv.Quote(certificate.Keystore.Alias))
+		}
+		if certificate.Keystore.FriendlyName != "" {
+			lines = append(lines, "  Keystore friendly name: "+strconv.Quote(certificate.Keystore.FriendlyName))
+		}
 		lines = append(lines,
-			"  Keystore format: "+certificate.Keystore.Format,
-			"  Keystore alias: "+strconv.Quote(certificate.Keystore.Alias),
 			"  Keystore entry type: "+certificate.Keystore.EntryType,
 			fmt.Sprintf("  Keystore chain index: %d", certificate.Keystore.ChainIndex),
 			"  Truststore: "+formatBoolean(certificate.Keystore.Truststore),
@@ -623,11 +646,26 @@ type jsonCertificate struct {
 }
 
 type jsonKeystoreInfo struct {
-	Format     string `json:"format"`
-	Alias      string `json:"alias"`
-	EntryType  string `json:"entry_type"`
-	ChainIndex int    `json:"chain_index"`
-	Truststore bool   `json:"truststore"`
+	Format       string `json:"format"`
+	Alias        string `json:"alias,omitempty"`
+	FriendlyName string `json:"friendly_name,omitempty"`
+	EntryType    string `json:"entry_type"`
+	ChainIndex   int    `json:"chain_index"`
+	Truststore   bool   `json:"truststore"`
+}
+
+type jsonPKCS12EncryptedContent struct {
+	RecordType string                    `json:"record_type"`
+	Path       string                    `json:"path"`
+	PKCS12     jsonPKCS12EncryptedDetail `json:"pkcs12"`
+}
+
+type jsonPKCS12EncryptedDetail struct {
+	Status       string `json:"status"`
+	ContentIndex int    `json:"content_index"`
+	Algorithm    string `json:"algorithm"`
+	AlgorithmOID string `json:"algorithm_oid"`
+	BagCount     *int   `json:"bag_count"`
 }
 
 type jsonPublicKey struct {
@@ -643,9 +681,21 @@ type jsonFingerprints struct {
 }
 
 func printJSONAt(output io.Writer, certificates []scanner.Certificate, now time.Time) error {
-	result := make([]jsonCertificate, 0, len(certificates))
+	return printJSONResultsAt(output, certificates, nil, now)
+}
+
+func printJSONResultsAt(
+	output io.Writer,
+	certificates []scanner.Certificate,
+	encrypted []scanner.PKCS12EncryptedContent,
+	now time.Time,
+) error {
+	result := make([]any, 0, len(certificates)+len(encrypted))
 	for _, certificate := range certificates {
 		result = append(result, newJSONCertificate(certificate, now))
+	}
+	for _, finding := range encrypted {
+		result = append(result, newJSONPKCS12EncryptedContent(finding))
 	}
 	encoder := json.NewEncoder(output)
 	encoder.SetIndent("", "  ")
@@ -689,10 +739,45 @@ func newJSONKeystoreInfo(keystore *scanner.KeystoreInfo) *jsonKeystoreInfo {
 		return nil
 	}
 	return &jsonKeystoreInfo{
-		Format:     keystore.Format,
-		Alias:      keystore.Alias,
-		EntryType:  keystore.EntryType,
-		ChainIndex: keystore.ChainIndex,
-		Truststore: keystore.Truststore,
+		Format:       keystore.Format,
+		Alias:        keystore.Alias,
+		FriendlyName: keystore.FriendlyName,
+		EntryType:    keystore.EntryType,
+		ChainIndex:   keystore.ChainIndex,
+		Truststore:   keystore.Truststore,
 	}
+}
+
+func newJSONPKCS12EncryptedContent(finding scanner.PKCS12EncryptedContent) jsonPKCS12EncryptedContent {
+	return jsonPKCS12EncryptedContent{
+		RecordType: "pkcs12_encrypted_content",
+		Path:       finding.Path,
+		PKCS12: jsonPKCS12EncryptedDetail{
+			Status:       "encrypted",
+			ContentIndex: finding.ContentIndex,
+			Algorithm:    finding.Algorithm,
+			AlgorithmOID: finding.AlgorithmOID,
+			BagCount:     finding.BagCount,
+		},
+	}
+}
+
+func printPKCS12EncryptedContent(output io.Writer, finding scanner.PKCS12EncryptedContent) error {
+	if _, err := fmt.Fprintf(output, "%s [PKCS#12 content %d]\n", finding.Path, finding.ContentIndex); err != nil {
+		return err
+	}
+	bagCount := "unknown"
+	if finding.BagCount != nil {
+		bagCount = strconv.Itoa(*finding.BagCount)
+	}
+	for _, line := range []string{
+		"  Status: encrypted; certificates are unreadable without a password",
+		fmt.Sprintf("  PBE algorithm: %s (%s)", finding.Algorithm, finding.AlgorithmOID),
+		"  Bag count: " + bagCount,
+	} {
+		if _, err := fmt.Fprintln(output, line); err != nil {
+			return err
+		}
+	}
+	return nil
 }
