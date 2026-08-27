@@ -103,6 +103,7 @@ func printJSONCertificateGroupsAt(output io.Writer, groups []certificateGroup, n
 	for _, group := range groups {
 		certificate := newJSONCertificate(group.Certificate, now)
 		certificate.Path = ""
+		certificate.Index = nil
 		result = append(result, jsonCertificateGroup{
 			Certificate: certificate,
 			Locations:   append([]certificateLocation{}, group.Locations...),

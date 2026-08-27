@@ -86,6 +86,16 @@ func TestScanFindsPEMBundleAndDERCertificate(t *testing.T) {
 	if len(report.Certificates) != 3 {
 		t.Fatalf("got %d certificates, want 3", len(report.Certificates))
 	}
+	indicesByPath := make(map[string][]int)
+	for _, certificate := range report.Certificates {
+		indicesByPath[certificate.Path] = append(indicesByPath[certificate.Path], certificate.Index)
+	}
+	if !reflect.DeepEqual(indicesByPath[bundlePath], []int{0, 1}) {
+		t.Errorf("PEM bundle indices = %v, want [0 1]", indicesByPath[bundlePath])
+	}
+	if !reflect.DeepEqual(indicesByPath[derPath], []int{0}) {
+		t.Errorf("DER indices = %v, want [0]", indicesByPath[derPath])
+	}
 	callbackMu.Lock()
 	if observedProgress.FilesDiscovered != 3 || observedProgress.FilesScanned != 3 || observedProgress.CertificatesFound != 3 {
 		t.Fatalf("progress = %+v, want 3 discovered, scanned, and found", observedProgress)
