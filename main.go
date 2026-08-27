@@ -151,6 +151,10 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 }
 
 func printCertificate(output io.Writer, certificate scanner.Certificate) error {
+	return printCertificateAt(output, certificate, time.Now())
+}
+
+func printCertificateAt(output io.Writer, certificate scanner.Certificate, now time.Time) error {
 	subject := certificate.Subject
 	if subject == "" {
 		subject = "(empty)"
@@ -169,18 +173,50 @@ func printCertificate(output io.Writer, certificate scanner.Certificate) error {
 	} else if len(certificate.ExtendedKeyUsage) > 0 {
 		usages = strings.Join(certificate.ExtendedKeyUsage, ", ")
 	}
+	keyUsage := "(none)"
+	if len(certificate.KeyUsage) > 0 {
+		keyUsage = strings.Join(certificate.KeyUsage, ", ")
+	}
+	serialNumber := certificate.SerialNumber
+	if serialNumber == "" {
+		serialNumber = "(none)"
+	}
+	certificateType := "leaf"
+	if certificate.IsCA {
+		certificateType = "CA"
+	}
+	publicKey := certificate.PublicKeyAlgorithm
+	if publicKey == "" {
+		publicKey = "unknown"
+	}
+	if certificate.PublicKeyBits > 0 {
+		publicKey += fmt.Sprintf(" (%d bits)", certificate.PublicKeyBits)
+	} else if certificate.PublicKeyCurve != "" {
+		publicKey += " (" + certificate.PublicKeyCurve + ")"
+	}
+	signatureAlgorithm := certificate.SignatureAlgorithm
+	if signatureAlgorithm == "" {
+		signatureAlgorithm = "unknown"
+	}
 
 	lines := []string{
 		certificate.Path,
 		"  Subject: " + subject,
 		"  Issuer: " + issuer,
+		"  Serial number: " + serialNumber,
+		"  Certificate type: " + certificateType,
+		"  Self-signed: " + formatBoolean(certificate.SelfSigned),
 		"  SANs: " + sans,
+		"  Key usage: " + keyUsage,
 		"  Extended key usage: " + usages,
+		"  Public key: " + publicKey,
+		"  Signature algorithm: " + signatureAlgorithm,
 		"  SHA-1 fingerprint: " + certificate.SHA1Fingerprint,
 		"  SHA-256 fingerprint: " + certificate.SHA256Fingerprint,
 		"  SPKI SHA-256 fingerprint: " + certificate.SPKISHA256Fingerprint,
 		"  Valid from: " + certificate.NotBefore.UTC().Format(time.RFC3339),
 		"  Valid to: " + certificate.NotAfter.UTC().Format(time.RFC3339),
+		"  Validity status: " + certificate.ValidityStatus(now),
 	}
 	for _, line := range lines {
 		if _, err := fmt.Fprintln(output, line); err != nil {
@@ -188,6 +224,13 @@ func printCertificate(output io.Writer, certificate scanner.Certificate) error {
 		}
 	}
 	return nil
+}
+
+func formatBoolean(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
 }
 
 func normalizeUsage(value string) (string, error) {
@@ -274,12 +317,25 @@ type jsonCertificate struct {
 	Path                         string           `json:"path"`
 	Subject                      string           `json:"subject"`
 	Issuer                       string           `json:"issuer"`
+	SerialNumber                 string           `json:"serial_number"`
+	IsCA                         bool             `json:"is_ca"`
+	SelfSigned                   bool             `json:"self_signed"`
 	SANs                         []string         `json:"sans"`
+	KeyUsage                     []string         `json:"key_usage"`
 	ExtendedKeyUsage             []string         `json:"extended_key_usage"`
 	ExtendedKeyUsageUnrestricted bool             `json:"extended_key_usage_unrestricted"`
+	PublicKey                    jsonPublicKey    `json:"public_key"`
+	SignatureAlgorithm           string           `json:"signature_algorithm"`
 	Fingerprints                 jsonFingerprints `json:"fingerprints"`
 	ValidFrom                    string           `json:"valid_from"`
 	ValidTo                      string           `json:"valid_to"`
+	ValidityStatus               string           `json:"validity_status"`
+}
+
+type jsonPublicKey struct {
+	Algorithm string `json:"algorithm"`
+	Bits      int    `json:"bits,omitempty"`
+	Curve     string `json:"curve,omitempty"`
 }
 
 type jsonFingerprints struct {
@@ -289,22 +345,37 @@ type jsonFingerprints struct {
 }
 
 func printJSON(output io.Writer, certificates []scanner.Certificate) error {
+	return printJSONAt(output, certificates, time.Now())
+}
+
+func printJSONAt(output io.Writer, certificates []scanner.Certificate, now time.Time) error {
 	result := make([]jsonCertificate, 0, len(certificates))
 	for _, certificate := range certificates {
 		result = append(result, jsonCertificate{
 			Path:                         certificate.Path,
 			Subject:                      certificate.Subject,
 			Issuer:                       certificate.Issuer,
+			SerialNumber:                 certificate.SerialNumber,
+			IsCA:                         certificate.IsCA,
+			SelfSigned:                   certificate.SelfSigned,
 			SANs:                         append([]string{}, certificate.SANs...),
+			KeyUsage:                     append([]string{}, certificate.KeyUsage...),
 			ExtendedKeyUsage:             append([]string{}, certificate.ExtendedKeyUsage...),
 			ExtendedKeyUsageUnrestricted: certificate.ExtendedKeyUsageUnrestricted,
+			PublicKey: jsonPublicKey{
+				Algorithm: certificate.PublicKeyAlgorithm,
+				Bits:      certificate.PublicKeyBits,
+				Curve:     certificate.PublicKeyCurve,
+			},
+			SignatureAlgorithm: certificate.SignatureAlgorithm,
 			Fingerprints: jsonFingerprints{
 				SHA1:       certificate.SHA1Fingerprint,
 				SHA256:     certificate.SHA256Fingerprint,
 				SPKISHA256: certificate.SPKISHA256Fingerprint,
 			},
-			ValidFrom: certificate.NotBefore.UTC().Format(time.RFC3339),
-			ValidTo:   certificate.NotAfter.UTC().Format(time.RFC3339),
+			ValidFrom:      certificate.NotBefore.UTC().Format(time.RFC3339),
+			ValidTo:        certificate.NotAfter.UTC().Format(time.RFC3339),
+			ValidityStatus: certificate.ValidityStatus(now),
 		})
 	}
 	encoder := json.NewEncoder(output)

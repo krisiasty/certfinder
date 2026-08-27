@@ -1,8 +1,7 @@
 # certfinder
 
 `certfinder` recursively finds PEM and DER encoded X.509 certificates and reports each certificate's file,
-subject, issuer, subject alternative names (SANs), extended key usage, certificate and SPKI fingerprints, and
-validity period.
+identity, purpose, cryptographic properties, certificate and SPKI fingerprints, and validity state.
 
 It uses only the Go standard library.
 
@@ -96,22 +95,46 @@ Each certificate is printed separately, including certificates in PEM bundles:
 /etc/example/server.pem
   Subject: CN=example.test,O=Example
   Issuer: CN=Example Internal CA,O=Example
+  Serial number: 5f43a21b
+  Certificate type: leaf
+  Self-signed: no
   SANs: DNS:example.test, DNS:www.example.test, IP:192.0.2.10
+  Key usage: digital-signature, key-encipherment
   Extended key usage: client, server
+  Public key: RSA (2048 bits)
+  Signature algorithm: SHA256-RSA
   SHA-1 fingerprint: 27b1462e7158f9489d662e9e41c52c8211015681
   SHA-256 fingerprint: 8a1b7487ad907ebc857a079e25e941bb304077f5f488638efee6cc50ed09be85
   SPKI SHA-256 fingerprint: 9fd236c32ec4a2a645e25d80ef1af7961e3706e98f2b60479063c69ae302d7df
   Valid from: 2026-01-15T12:00:00Z
   Valid to: 2027-01-15T12:00:00Z
+  Validity status: valid
 ```
 
-JSON groups the lowercase hexadecimal identifiers together:
+Serial numbers use lowercase hexadecimal. The certificate type is `CA` or `leaf`. Self-signed status requires both
+matching subject and issuer names and a valid signature made by the certificate's own public key. Public-key output
+includes the RSA key size or ECDSA curve where applicable.
+
+JSON exposes the same health metadata with typed snake-case fields and groups the lowercase hexadecimal identifiers
+together:
 
 ```json
-"fingerprints": {
-  "sha1": "27b1462e7158f9489d662e9e41c52c8211015681",
-  "sha256": "8a1b7487ad907ebc857a079e25e941bb304077f5f488638efee6cc50ed09be85",
-  "spki_sha256": "9fd236c32ec4a2a645e25d80ef1af7961e3706e98f2b60479063c69ae302d7df"
+{
+  "serial_number": "5f43a21b",
+  "is_ca": false,
+  "self_signed": false,
+  "key_usage": ["digital-signature", "key-encipherment"],
+  "public_key": {
+    "algorithm": "RSA",
+    "bits": 2048
+  },
+  "signature_algorithm": "SHA256-RSA",
+  "fingerprints": {
+    "sha1": "27b1462e7158f9489d662e9e41c52c8211015681",
+    "sha256": "8a1b7487ad907ebc857a079e25e941bb304077f5f488638efee6cc50ed09be85",
+    "spki_sha256": "9fd236c32ec4a2a645e25d80ef1af7961e3706e98f2b60479063c69ae302d7df"
+  },
+  "validity_status": "valid"
 }
 ```
 

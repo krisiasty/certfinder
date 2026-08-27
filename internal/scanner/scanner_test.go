@@ -3,8 +3,10 @@ package scanner
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha1" //nolint:gosec // The production compatibility fingerprint must be verified against SHA-1.
 	"crypto/sha256"
 	"crypto/x509"
@@ -263,6 +265,179 @@ func TestScanFollowsRootDirectorySymlinkOnce(t *testing.T) {
 	}
 }
 
+func TestScanReportsCertificateHealth(t *testing.T) {
+	t.Parallel()
+	_, certificatePEM, _ := makeCertificate(t, certificateSpec{
+		serial:   0xabc123,
+		common:   "root.example",
+		isCA:     true,
+		keyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	})
+	path := filepath.Join(t.TempDir(), "root.pem")
+	writeFile(t, path, certificatePEM)
+
+	report, err := Scan(context.Background(), path, Options{MaxBytes: DefaultMaxBytes, Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Certificates) != 1 {
+		t.Fatalf("scan found %d certificates, want 1", len(report.Certificates))
+	}
+	certificate := report.Certificates[0]
+	if certificate.SerialNumber != "abc123" {
+		t.Errorf("serial number = %q, want abc123", certificate.SerialNumber)
+	}
+	if !certificate.IsCA {
+		t.Error("CA certificate was reported as a leaf")
+	}
+	if !certificate.SelfSigned {
+		t.Error("self-signed certificate was not detected")
+	}
+	if !reflect.DeepEqual(certificate.KeyUsage, []string{"certificate-signing", "crl-signing"}) {
+		t.Errorf("key usage = %v, want certificate-signing and crl-signing", certificate.KeyUsage)
+	}
+	if certificate.PublicKeyAlgorithm != "ECDSA" || certificate.PublicKeyCurve != "P-256" || certificate.PublicKeyBits != 0 {
+		t.Errorf(
+			"public key = %s, bits %d, curve %q; want ECDSA, bits 0, curve P-256",
+			certificate.PublicKeyAlgorithm,
+			certificate.PublicKeyBits,
+			certificate.PublicKeyCurve,
+		)
+	}
+	if certificate.SignatureAlgorithm != "ECDSA-SHA256" {
+		t.Errorf("signature algorithm = %q, want ECDSA-SHA256", certificate.SignatureAlgorithm)
+	}
+}
+
+func TestSelfSignedRequiresMatchingNameAndValidSelfSignature(t *testing.T) {
+	t.Parallel()
+	selfDER, _, _ := makeCertificate(t, certificateSpec{serial: 20, common: "same-name.example"})
+	selfCertificate, err := x509.ParseCertificate(selfDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isSelfSigned(selfCertificate) {
+		t.Fatal("valid self-signed certificate was not detected")
+	}
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := pkix.Name{CommonName: "same-name.example"}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(21),
+		Subject:      name,
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	parent := &x509.Certificate{Subject: name}
+	issuedDER, err := x509.CreateCertificate(rand.Reader, template, parent, &leafKey.PublicKey, issuerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuedCertificate, err := x509.ParseCertificate(issuedDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isSelfSigned(issuedCertificate) {
+		t.Fatal("certificate with equal subject and issuer names but a different signer was reported as self-signed")
+	}
+}
+
+func TestDescribePublicKeyAlgorithms(t *testing.T) {
+	t.Parallel()
+	rsaModulus := new(big.Int).Lsh(big.NewInt(1), 2047)
+	tests := []struct {
+		name          string
+		certificate   *x509.Certificate
+		wantAlgorithm string
+		wantBits      int
+		wantCurve     string
+	}{
+		{
+			name: "RSA",
+			certificate: &x509.Certificate{
+				PublicKeyAlgorithm: x509.RSA,
+				PublicKey:          &rsa.PublicKey{N: rsaModulus, E: 65537},
+			},
+			wantAlgorithm: "RSA",
+			wantBits:      2048,
+		},
+		{
+			name: "ECDSA",
+			certificate: &x509.Certificate{
+				PublicKeyAlgorithm: x509.ECDSA,
+				PublicKey:          &ecdsa.PublicKey{Curve: elliptic.P384()},
+			},
+			wantAlgorithm: "ECDSA",
+			wantCurve:     "P-384",
+		},
+		{
+			name: "Ed25519",
+			certificate: &x509.Certificate{
+				PublicKeyAlgorithm: x509.Ed25519,
+				PublicKey:          make(ed25519.PublicKey, ed25519.PublicKeySize),
+			},
+			wantAlgorithm: "Ed25519",
+		},
+		{
+			name: "unknown",
+			certificate: &x509.Certificate{
+				PublicKeyAlgorithm: x509.UnknownPublicKeyAlgorithm,
+				PublicKey:          struct{}{},
+			},
+			wantAlgorithm: "unknown",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			algorithm, bits, curve := describePublicKey(test.certificate)
+			if algorithm != test.wantAlgorithm || bits != test.wantBits || curve != test.wantCurve {
+				t.Fatalf(
+					"describePublicKey() = %q, %d, %q; want %q, %d, %q",
+					algorithm,
+					bits,
+					curve,
+					test.wantAlgorithm,
+					test.wantBits,
+					test.wantCurve,
+				)
+			}
+		})
+	}
+}
+
+func TestCertificateValidityStatus(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	certificate := Certificate{NotBefore: start, NotAfter: end}
+	tests := []struct {
+		name string
+		at   time.Time
+		want string
+	}{
+		{name: "not yet valid", at: start.Add(-time.Nanosecond), want: ValidityNotYetValid},
+		{name: "valid at start", at: start, want: ValidityValid},
+		{name: "valid at end", at: end, want: ValidityValid},
+		{name: "expired", at: end.Add(time.Nanosecond), want: ValidityExpired},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := certificate.ValidityStatus(test.at); got != test.want {
+				t.Fatalf("ValidityStatus(%s) = %q, want %q", test.at, got, test.want)
+			}
+		})
+	}
+}
+
 type certificateSpec struct {
 	serial       int64
 	common       string
@@ -272,6 +447,8 @@ type certificateSpec struct {
 	emails       []string
 	uris         []*url.URL
 	usage        x509.ExtKeyUsage
+	isCA         bool
+	keyUsage     x509.KeyUsage
 }
 
 func makeCertificate(t *testing.T, spec certificateSpec) ([]byte, []byte, time.Time) {
@@ -281,16 +458,22 @@ func makeCertificate(t *testing.T, spec certificateSpec) ([]byte, []byte, time.T
 		t.Fatal(err)
 	}
 	expires := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	keyUsage := spec.keyUsage
+	if keyUsage == 0 {
+		keyUsage = x509.KeyUsageDigitalSignature
+	}
 	template := &x509.Certificate{
-		SerialNumber:   big.NewInt(spec.serial),
-		Subject:        pkix.Name{CommonName: spec.common},
-		NotBefore:      time.Date(2025, time.January, 2, 3, 4, 5, 0, time.UTC),
-		NotAfter:       expires,
-		DNSNames:       spec.dnsNames,
-		IPAddresses:    spec.ips,
-		EmailAddresses: spec.emails,
-		URIs:           spec.uris,
-		KeyUsage:       x509.KeyUsageDigitalSignature,
+		SerialNumber:          big.NewInt(spec.serial),
+		Subject:               pkix.Name{CommonName: spec.common},
+		NotBefore:             time.Date(2025, time.January, 2, 3, 4, 5, 0, time.UTC),
+		NotAfter:              expires,
+		DNSNames:              spec.dnsNames,
+		IPAddresses:           spec.ips,
+		EmailAddresses:        spec.emails,
+		URIs:                  spec.uris,
+		KeyUsage:              keyUsage,
+		IsCA:                  spec.isCA,
+		BasicConstraintsValid: spec.isCA,
 	}
 	if spec.usage != 0 {
 		template.ExtKeyUsage = []x509.ExtKeyUsage{spec.usage}
