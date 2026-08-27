@@ -30,13 +30,16 @@ type scanConfiguration struct {
 	IgnoreErrors   bool
 	Usage          string
 	Expiration     string
-	JSON           bool
+	FailExpiring   string
+	Output         string
+	Quiet          bool
 }
 
 type progressDisplay struct {
 	progressOutput    io.Writer
 	certificateOutput io.Writer
 	showCertificates  bool
+	quiet             bool
 	terminal          bool
 	started           time.Time
 
@@ -48,11 +51,12 @@ type progressDisplay struct {
 	wait     sync.WaitGroup
 }
 
-func newProgressDisplay(progressOutput, certificateOutput io.Writer, showCertificates bool) *progressDisplay {
+func newProgressDisplay(progressOutput, certificateOutput io.Writer, showCertificates, quiet bool) *progressDisplay {
 	return &progressDisplay{
 		progressOutput:    progressOutput,
 		certificateOutput: certificateOutput,
 		showCertificates:  showCertificates,
+		quiet:             quiet,
 		terminal:          isTerminal(progressOutput),
 		done:              make(chan struct{}),
 	}
@@ -61,6 +65,10 @@ func newProgressDisplay(progressOutput, certificateOutput io.Writer, showCertifi
 func (display *progressDisplay) Start(configuration scanConfiguration) {
 	display.mu.Lock()
 	display.started = time.Now()
+	if display.quiet {
+		display.mu.Unlock()
+		return
+	}
 	path := configuration.Path
 	if absolute, err := filepath.Abs(path); err == nil {
 		path = absolute
@@ -73,24 +81,30 @@ func (display *progressDisplay) Start(configuration scanConfiguration) {
 	if expiration == "" {
 		expiration = "none"
 	}
+	failExpiring := configuration.FailExpiring
+	if failExpiring == "" {
+		failExpiring = "none"
+	}
 	maxBytes := strconv.FormatInt(configuration.MaxBytes, 10)
 	if configuration.MaxBytes == 0 {
 		maxBytes = "unlimited"
 	}
-	output := "text"
-	if configuration.JSON {
-		output = "json"
+	output := configuration.Output
+	if output == "" {
+		output = outputText
 	}
 
 	display.writeProgress("%s %s\n", programName, buildinfo.Version())
 	display.writeProgress("Scan path: %s\n", path)
 	display.writeProgress("Workers: %d\n", configuration.Workers)
 	display.writeProgress(
-		"Options: max-bytes=%s usage=%s expiration=%s output=%s\n",
+		"Options: max-bytes=%s usage=%s expiration=%s fail-expiring=%s output=%s quiet=%t\n",
 		maxBytes,
 		usage,
 		expiration,
+		failExpiring,
 		output,
+		configuration.Quiet,
 	)
 	display.writeProgress(
 		"Traversal: exclude=%s extensions=%s one-file-system=%t follow-symlinks=%t ignore-errors=%t\n",
@@ -135,14 +149,16 @@ func (display *progressDisplay) Certificate(certificate scanner.Certificate) {
 	if display.stopped || !display.showCertificates {
 		return
 	}
-	if display.terminal {
+	if !display.quiet && display.terminal {
 		display.clearStatusLocked()
 	}
 	if display.writeErr == nil {
 		display.writeErr = printCertificate(display.certificateOutput, certificate)
 	}
-	display.writeProgress("\n")
-	display.drawStatusLocked()
+	if !display.quiet {
+		display.writeProgress("\n")
+		display.drawStatusLocked()
+	}
 }
 
 func (display *progressDisplay) Stop(completed bool) {
@@ -155,6 +171,9 @@ func (display *progressDisplay) Stop(completed bool) {
 	close(display.done)
 	display.mu.Unlock()
 	display.wait.Wait()
+	if display.quiet {
+		return
+	}
 
 	display.mu.Lock()
 	defer display.mu.Unlock()

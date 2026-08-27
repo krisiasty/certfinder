@@ -44,6 +44,8 @@ certfinder -max-bytes 8388608 -workers 4 .
 certfinder -usage=server -expiration=30d /etc/certificates
 certfinder -expired /etc/certificates
 certfinder -json /etc/certificates
+certfinder -jsonl -quiet /etc/certificates
+certfinder -usage=server -fail-expiring=30d -quiet /etc/certificates
 certfinder -exclude=.git -exclude='build/*' .
 certfinder -extensions=.pem,.crt -extensions=cer /etc
 certfinder -one-file-system -ignore-errors /
@@ -73,6 +75,27 @@ Use `-expiration=30d` to print certificates that are already expired or will exp
 duration units, such as `48h` or `90m`, are also accepted. `-expired` is a shortcut for `-expiration=0d`. The two
 flags cannot be combined.
 
+## Monitoring and exit statuses
+
+Use `-fail-expiring=30d` to return an operational-finding status when a matching certificate is already expired or
+will expire within 30 days. Standard Go duration units are also accepted. `-fail-expired` is a shortcut for
+`-fail-expiring=0d`, and the two flags cannot be combined. These flags change only the exit status; they do not filter
+output.
+
+Monitoring applies after the existing selection filters. For example, `-usage=server -fail-expired` ignores expired
+certificates that are restricted to client authentication. Adding `-expiration=7d` further limits both output and
+monitoring to certificates selected by that seven-day window.
+
+Exit statuses are:
+
+- `0`: scan completed without a monitored finding.
+- `1`: runtime, traversal, scan, or output error.
+- `2`: invalid command-line usage.
+- `3`: at least one matching certificate crossed the requested monitoring threshold.
+
+Runtime errors take precedence over operational findings. With `-ignore-errors`, non-fatal path errors remain visible
+as warnings but do not override status `3`.
+
 ## Filesystem traversal
 
 Use repeatable `-exclude=GLOB` options to skip files or prune directories before they are traversed. Patterns are
@@ -98,18 +121,19 @@ Invalid options and failures inspecting the scan root remain fatal.
 ## Progress
 
 At startup, `certfinder` writes its name, version, resolved scan path, worker count, and all effective scan and
-traversal options to stderr.
-A status line shows the number of files discovered and scanned, pending files, certificates found, and whether
-directory discovery is complete. The periodic status refresh is limited to once every five seconds. The final
-summary also reports how many files were stopped at the `-max-bytes` sniffing limit without triggering a full reread.
+traversal options to stderr. A status line shows the number of files discovered and scanned, pending files,
+certificates found, and whether directory discovery is complete. The periodic status refresh is limited to once
+every five seconds. The final summary also reports how many files were stopped at the `-max-bytes` sniffing limit
+without triggering a full reread.
 
 While directory discovery is running, the discovered-file total can increase. This keeps scanning single-pass and
 avoids delaying the scan with a separate counting traversal. When a certificate is found in text mode, its details
 replace the current terminal status line and a fresh status line is drawn beneath it. When stderr is redirected,
 progress is emitted as ordinary lines without terminal control sequences.
 
-Progress and structured logs use stderr. Certificate text and JSON use stdout, so `-json` output remains suitable
-for piping to another program.
+Progress and structured logs use stderr. Certificate text, JSON, and JSON Lines use stdout, so structured output
+remains suitable for piping to another program. `-quiet` suppresses startup information, progress updates, and the
+final summary while preserving certificate output, warnings, and errors.
 
 ## Output
 
@@ -166,5 +190,13 @@ SHA-1 is emitted only as a compatibility identifier for certificate-search ecosy
 certificate validation or other security decisions.
 
 By default, server, client, dual-purpose, and unspecified-purpose certificates are all included. Pass `-json` to
-emit the filtered results as a JSON array with snake-case field names and RFC 3339 timestamps. Runtime errors and
-warnings use structured `slog` text records on stderr, so JSON written to stdout remains valid.
+emit the filtered results as a sorted JSON array with snake-case field names and RFC 3339 timestamps. Array output is
+written after scanning finishes and is convenient when one complete, deterministic JSON document is required.
+
+Pass `-jsonl` to emit each matching certificate immediately as one compact JSON object followed by a newline. JSON
+Lines output has no enclosing array, uses bounded certificate memory, and follows worker completion order rather than
+sorted path order. Complete lines remain usable if a scan is interrupted. A scan with no matches emits no JSON Lines
+records. `-json` and `-jsonl` cannot be combined.
+
+For example, use `jq '.[]' results.json` with array JSON and `jq '.' results.jsonl` with JSON Lines. Runtime errors and
+warnings use structured `slog` text records on stderr, so structured stdout remains valid.
