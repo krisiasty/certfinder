@@ -112,6 +112,8 @@ type Certificate struct {
 	SPKISHA256Fingerprint        string
 	NotBefore                    time.Time
 	NotAfter                     time.Time
+	dnsNames                     []string
+	ipAddresses                  []net.IP
 }
 
 // ValidityStatus returns the certificate validity state at the supplied time.
@@ -123,6 +125,17 @@ func (certificate Certificate) ValidityStatus(at time.Time) string {
 		return ValidityExpired
 	}
 	return ValidityValid
+}
+
+// VerifyHostname reports whether the certificate is valid for the supplied
+// DNS name or IP address. Matching follows crypto/x509 rules, including SANs
+// and left-most-label wildcards; the legacy Common Name is ignored.
+func (certificate Certificate) VerifyHostname(hostname string) error {
+	parsed := x509.Certificate{
+		DNSNames:    certificate.dnsNames,
+		IPAddresses: certificate.ipAddresses,
+	}
+	return parsed.VerifyHostname(hostname)
 }
 
 // FileError is a non-fatal error encountered while scanning one path.
@@ -735,7 +748,17 @@ func describe(path string, index int, certificate *x509.Certificate) Certificate
 		SPKISHA256Fingerprint:        hex.EncodeToString(spkiSHA256Fingerprint[:]),
 		NotBefore:                    certificate.NotBefore,
 		NotAfter:                     certificate.NotAfter,
+		dnsNames:                     slices.Clone(certificate.DNSNames),
+		ipAddresses:                  cloneIPAddresses(certificate.IPAddresses),
 	}
+}
+
+func cloneIPAddresses(addresses []net.IP) []net.IP {
+	cloned := make([]net.IP, len(addresses))
+	for index, address := range addresses {
+		cloned[index] = slices.Clone(address)
+	}
+	return cloned
 }
 
 func formatSerialNumber(certificate *x509.Certificate) string {
