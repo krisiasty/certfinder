@@ -129,6 +129,9 @@ func TestRunJSONLinesEmitsOneCompactObjectPerCertificate(t *testing.T) {
 		if !wantPaths[certificate.Path] {
 			t.Errorf("unexpected JSON Lines certificate path %q", certificate.Path)
 		}
+		if certificate.Index == nil || *certificate.Index != 0 {
+			t.Errorf("JSON Lines certificate index = %v, want 0", certificate.Index)
+		}
 		delete(wantPaths, certificate.Path)
 	}
 	if len(wantPaths) != 0 {
@@ -264,6 +267,43 @@ func TestRunDuplicateModesGroupFilesAndBundleEntries(t *testing.T) {
 	}
 	if len(certificates) != 4 {
 		t.Fatalf("default JSON certificate count = %d, want 4", len(certificates))
+	}
+	wantLocations = []certificateLocation{
+		{Path: duplicatePath, Index: 0},
+		{Path: bundlePath, Index: 0},
+		{Path: bundlePath, Index: 1},
+		{Path: singletonPath, Index: 0},
+	}
+	for index, certificate := range certificates {
+		if certificate.Index == nil {
+			t.Errorf("certificate %d has no JSON index", index)
+			continue
+		}
+		location := certificateLocation{Path: certificate.Path, Index: *certificate.Index}
+		if location != wantLocations[index] {
+			t.Errorf("certificate location %d = %+v, want %+v", index, location, wantLocations[index])
+		}
+	}
+}
+
+func TestRunTextReportsCertificateIndices(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	duplicatePath, bundlePath, singletonPath := writeDuplicateTestFixture(t, directory)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if status := run(context.Background(), []string{"-quiet", directory}, &stdout, &stderr); status != exitSuccess {
+		t.Fatalf("status = %d; stderr = %q", status, stderr.String())
+	}
+	for _, header := range []string{
+		duplicatePath + " [index 0]\n",
+		bundlePath + " [index 0]\n",
+		bundlePath + " [index 1]\n",
+		singletonPath + " [index 0]\n",
+	} {
+		if !strings.Contains(stdout.String(), header) {
+			t.Errorf("text output %q does not contain %q", stdout.String(), header)
+		}
 	}
 }
 
@@ -736,6 +776,7 @@ func TestPrintCertificateIncludesIssuerAndValidity(t *testing.T) {
 	now := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
 	err := printCertificateAt(&output, scanner.Certificate{
 		Path:                  "/certificates/server.pem",
+		Index:                 2,
 		Subject:               "CN=server.example",
 		Issuer:                "CN=Example Test CA",
 		SerialNumber:          "abc123",
@@ -758,6 +799,7 @@ func TestPrintCertificateIncludesIssuerAndValidity(t *testing.T) {
 	}
 
 	wantParts := []string{
+		"/certificates/server.pem [index 2]\n",
 		"  Issuer: CN=Example Test CA\n",
 		"  Serial number: abc123\n",
 		"  Certificate type: leaf\n",
@@ -869,6 +911,7 @@ func TestPrintJSON(t *testing.T) {
 	t.Parallel()
 	certificate := scanner.Certificate{
 		Path:                         "/certificates/server.pem",
+		Index:                        2,
 		Subject:                      "CN=server.example",
 		Issuer:                       "CN=Example Test CA",
 		SerialNumber:                 "abc123",
@@ -897,6 +940,7 @@ func TestPrintJSON(t *testing.T) {
 	}
 	wantParts := []string{
 		`"path": "/certificates/server.pem"`,
+		`"index": 2`,
 		`"serial_number": "abc123"`,
 		`"is_ca": true`,
 		`"self_signed": true`,

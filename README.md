@@ -202,7 +202,7 @@ final summary while preserving certificate output, warnings, and errors.
 Each certificate is printed separately, including certificates in PEM bundles:
 
 ```text
-/etc/example/server.pem
+/etc/example/server.pem [index 0]
   Subject: CN=example.test,O=Example
   Issuer: CN=Example Internal CA,O=Example
   Serial number: 5f43a21b
@@ -225,11 +225,18 @@ Serial numbers use lowercase hexadecimal. The certificate type is `CA` or `leaf`
 matching subject and issuer names and a valid signature made by the certificate's own public key. Public-key output
 includes the RSA key size or ECDSA curve where applicable.
 
+Certificate indices are zero-based in every output mode. A single-certificate PEM or DER file therefore uses
+`index 0`; certificates in a PEM bundle use `index 0`, `index 1`, and so on in parsed certificate order. Text appends
+the index to the path header, while JSON and JSON Lines expose it as a numeric `index` field. Grouped `-unique` and
+`-duplicates` output keeps each index with its corresponding path in `locations`.
+
 JSON exposes the same health metadata with typed snake-case fields and groups the lowercase hexadecimal identifiers
 together:
 
 ```json
 {
+  "path": "/etc/example/server.pem",
+  "index": 0,
   "serial_number": "5f43a21b",
   "is_ca": false,
   "self_signed": false,

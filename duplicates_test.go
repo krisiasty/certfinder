@@ -92,7 +92,7 @@ func TestGroupedOutputIncludesAllLocations(t *testing.T) {
 	if len(decoded) != 1 || len(decoded[0].Locations) != 2 {
 		t.Fatalf("JSON groups = %+v, want one group with two locations", decoded)
 	}
-	if decoded[0].Certificate.Path != "" || strings.Contains(jsonOutput.String(), `"path": ""`) {
-		t.Errorf("grouped JSON contains an ambiguous representative path: %s", jsonOutput.String())
+	if decoded[0].Certificate.Path != "" || decoded[0].Certificate.Index != nil {
+		t.Errorf("grouped JSON contains an ambiguous representative location: %s", jsonOutput.String())
 	}
 }

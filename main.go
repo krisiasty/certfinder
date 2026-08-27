@@ -411,7 +411,7 @@ func printCertificate(output io.Writer, certificate scanner.Certificate) error {
 }
 
 func printCertificateAt(output io.Writer, certificate scanner.Certificate, now time.Time) error {
-	if _, err := fmt.Fprintln(output, certificate.Path); err != nil {
+	if _, err := fmt.Fprintf(output, "%s [index %d]\n", certificate.Path, certificate.Index); err != nil {
 		return err
 	}
 	return printCertificateDetailsAt(output, certificate, now)
@@ -589,6 +589,7 @@ func contains(values []string, wanted string) bool {
 
 type jsonCertificate struct {
 	Path                         string           `json:"path,omitempty"`
+	Index                        *int             `json:"index,omitempty"`
 	Subject                      string           `json:"subject"`
 	Issuer                       string           `json:"issuer"`
 	SerialNumber                 string           `json:"serial_number"`
@@ -629,8 +630,10 @@ func printJSONAt(output io.Writer, certificates []scanner.Certificate, now time.
 }
 
 func newJSONCertificate(certificate scanner.Certificate, now time.Time) jsonCertificate {
+	index := certificate.Index
 	return jsonCertificate{
 		Path:                         certificate.Path,
+		Index:                        &index,
 		Subject:                      certificate.Subject,
 		Issuer:                       certificate.Issuer,
 		SerialNumber:                 certificate.SerialNumber,
