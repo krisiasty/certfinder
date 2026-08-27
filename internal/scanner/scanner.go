@@ -118,8 +118,10 @@ type Certificate struct {
 	NotBefore                    time.Time
 	NotAfter                     time.Time
 	Keystore                     *KeystoreInfo
+	Verification                 *VerificationResult
 	dnsNames                     []string
 	ipAddresses                  []net.IP
+	parsed                       *x509.Certificate
 }
 
 // KeystoreInfo identifies a certificate entry inside a keystore container.
@@ -865,6 +867,7 @@ func describe(path string, index int, certificate *x509.Certificate) Certificate
 		NotAfter:                     certificate.NotAfter,
 		dnsNames:                     slices.Clone(certificate.DNSNames),
 		ipAddresses:                  cloneIPAddresses(certificate.IPAddresses),
+		parsed:                       certificate,
 	}
 }
 
