@@ -53,7 +53,11 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.SetOutput(stderr)
 	var excludes excludeFlag
 	var extensions extensionFlag
-	maxBytes := flags.Int64("max-bytes", scanner.DefaultMaxBytes, "initial bytes inspected per file; PEM matches are read fully; 0 reads all files fully")
+	maxBytes := flags.Int64(
+		"max-bytes",
+		scanner.DefaultMaxBytes,
+		"initial bytes inspected per file; PEM and Java keystore matches are read fully; 0 reads all files fully",
+	)
 	workers := flags.Int("workers", min(runtime.GOMAXPROCS(0), 8), "number of files scanned concurrently")
 	flags.Var(&excludes, "exclude", "exclude a relative path glob; repeatable; patterns without / match at any depth")
 	flags.Var(&extensions, "extensions", "scan only these file extensions; comma-separated or repeatable")
@@ -75,7 +79,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	version := flags.Bool("version", false, "show version and build information")
 	flags.Usage = func() {
 		_, _ = fmt.Fprintln(stderr, "Usage: certfinder [options] PATH")
-		_, _ = fmt.Fprintln(stderr, "Find PEM or DER encoded X.509 certificates in PATH and its subdirectories.")
+		_, _ = fmt.Fprintln(stderr, "Find X.509 certificates in PEM, DER, JKS, or JCEKS files in PATH and its subdirectories.")
 		_, _ = fmt.Fprintln(stderr)
 		flags.PrintDefaults()
 	}
@@ -462,24 +466,34 @@ func printCertificateDetailsAt(output io.Writer, certificate scanner.Certificate
 		signatureAlgorithm = "unknown"
 	}
 
-	lines := []string{
-		"  Subject: " + subject,
-		"  Issuer: " + issuer,
-		"  Serial number: " + serialNumber,
-		"  Certificate type: " + certificateType,
-		"  Self-signed: " + formatBoolean(certificate.SelfSigned),
-		"  SANs: " + sans,
-		"  Key usage: " + keyUsage,
-		"  Extended key usage: " + usages,
-		"  Public key: " + publicKey,
-		"  Signature algorithm: " + signatureAlgorithm,
-		"  SHA-1 fingerprint: " + certificate.SHA1Fingerprint,
-		"  SHA-256 fingerprint: " + certificate.SHA256Fingerprint,
-		"  SPKI SHA-256 fingerprint: " + certificate.SPKISHA256Fingerprint,
-		"  Valid from: " + certificate.NotBefore.UTC().Format(time.RFC3339),
-		"  Valid to: " + certificate.NotAfter.UTC().Format(time.RFC3339),
-		"  Validity status: " + certificate.ValidityStatus(now),
+	lines := make([]string, 0, 20)
+	if certificate.Keystore != nil {
+		lines = append(lines,
+			"  Keystore format: "+certificate.Keystore.Format,
+			"  Keystore alias: "+strconv.Quote(certificate.Keystore.Alias),
+			"  Keystore entry type: "+certificate.Keystore.EntryType,
+			fmt.Sprintf("  Keystore chain index: %d", certificate.Keystore.ChainIndex),
+			"  Truststore: "+formatBoolean(certificate.Keystore.Truststore),
+		)
 	}
+	lines = append(lines,
+		"  Subject: "+subject,
+		"  Issuer: "+issuer,
+		"  Serial number: "+serialNumber,
+		"  Certificate type: "+certificateType,
+		"  Self-signed: "+formatBoolean(certificate.SelfSigned),
+		"  SANs: "+sans,
+		"  Key usage: "+keyUsage,
+		"  Extended key usage: "+usages,
+		"  Public key: "+publicKey,
+		"  Signature algorithm: "+signatureAlgorithm,
+		"  SHA-1 fingerprint: "+certificate.SHA1Fingerprint,
+		"  SHA-256 fingerprint: "+certificate.SHA256Fingerprint,
+		"  SPKI SHA-256 fingerprint: "+certificate.SPKISHA256Fingerprint,
+		"  Valid from: "+certificate.NotBefore.UTC().Format(time.RFC3339),
+		"  Valid to: "+certificate.NotAfter.UTC().Format(time.RFC3339),
+		"  Validity status: "+certificate.ValidityStatus(now),
+	)
 	for _, line := range lines {
 		if _, err := fmt.Fprintln(output, line); err != nil {
 			return err
@@ -588,23 +602,32 @@ func contains(values []string, wanted string) bool {
 }
 
 type jsonCertificate struct {
-	Path                         string           `json:"path,omitempty"`
-	Index                        *int             `json:"index,omitempty"`
-	Subject                      string           `json:"subject"`
-	Issuer                       string           `json:"issuer"`
-	SerialNumber                 string           `json:"serial_number"`
-	IsCA                         bool             `json:"is_ca"`
-	SelfSigned                   bool             `json:"self_signed"`
-	SANs                         []string         `json:"sans"`
-	KeyUsage                     []string         `json:"key_usage"`
-	ExtendedKeyUsage             []string         `json:"extended_key_usage"`
-	ExtendedKeyUsageUnrestricted bool             `json:"extended_key_usage_unrestricted"`
-	PublicKey                    jsonPublicKey    `json:"public_key"`
-	SignatureAlgorithm           string           `json:"signature_algorithm"`
-	Fingerprints                 jsonFingerprints `json:"fingerprints"`
-	ValidFrom                    string           `json:"valid_from"`
-	ValidTo                      string           `json:"valid_to"`
-	ValidityStatus               string           `json:"validity_status"`
+	Path                         string            `json:"path,omitempty"`
+	Index                        *int              `json:"index,omitempty"`
+	Subject                      string            `json:"subject"`
+	Issuer                       string            `json:"issuer"`
+	SerialNumber                 string            `json:"serial_number"`
+	IsCA                         bool              `json:"is_ca"`
+	SelfSigned                   bool              `json:"self_signed"`
+	SANs                         []string          `json:"sans"`
+	KeyUsage                     []string          `json:"key_usage"`
+	ExtendedKeyUsage             []string          `json:"extended_key_usage"`
+	ExtendedKeyUsageUnrestricted bool              `json:"extended_key_usage_unrestricted"`
+	PublicKey                    jsonPublicKey     `json:"public_key"`
+	SignatureAlgorithm           string            `json:"signature_algorithm"`
+	Fingerprints                 jsonFingerprints  `json:"fingerprints"`
+	ValidFrom                    string            `json:"valid_from"`
+	ValidTo                      string            `json:"valid_to"`
+	ValidityStatus               string            `json:"validity_status"`
+	Keystore                     *jsonKeystoreInfo `json:"keystore,omitempty"`
+}
+
+type jsonKeystoreInfo struct {
+	Format     string `json:"format"`
+	Alias      string `json:"alias"`
+	EntryType  string `json:"entry_type"`
+	ChainIndex int    `json:"chain_index"`
+	Truststore bool   `json:"truststore"`
 }
 
 type jsonPublicKey struct {
@@ -657,5 +680,19 @@ func newJSONCertificate(certificate scanner.Certificate, now time.Time) jsonCert
 		ValidFrom:      certificate.NotBefore.UTC().Format(time.RFC3339),
 		ValidTo:        certificate.NotAfter.UTC().Format(time.RFC3339),
 		ValidityStatus: certificate.ValidityStatus(now),
+		Keystore:       newJSONKeystoreInfo(certificate.Keystore),
+	}
+}
+
+func newJSONKeystoreInfo(keystore *scanner.KeystoreInfo) *jsonKeystoreInfo {
+	if keystore == nil {
+		return nil
+	}
+	return &jsonKeystoreInfo{
+		Format:     keystore.Format,
+		Alias:      keystore.Alias,
+		EntryType:  keystore.EntryType,
+		ChainIndex: keystore.ChainIndex,
+		Truststore: keystore.Truststore,
 	}
 }

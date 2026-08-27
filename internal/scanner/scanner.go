@@ -112,8 +112,18 @@ type Certificate struct {
 	SPKISHA256Fingerprint        string
 	NotBefore                    time.Time
 	NotAfter                     time.Time
+	Keystore                     *KeystoreInfo
 	dnsNames                     []string
 	ipAddresses                  []net.IP
+}
+
+// KeystoreInfo identifies a certificate entry inside a Java keystore.
+type KeystoreInfo struct {
+	Format     string
+	Alias      string
+	EntryType  string
+	ChainIndex int
+	Truststore bool
 }
 
 // ValidityStatus returns the certificate validity state at the supplied time.
@@ -670,6 +680,29 @@ func scanFile(path string, maxBytes int64) ([]Certificate, bool, error) {
 		} else if !errors.Is(err, io.EOF) {
 			return nil, false, err
 		}
+	}
+	if _, isJavaKeystore := detectJavaKeystore(data); isJavaKeystore {
+		if !complete {
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				return nil, false, err
+			}
+			data, err = io.ReadAll(file)
+			if err != nil {
+				return nil, false, err
+			}
+		}
+		parsed, parseErr := parseJavaKeystore(data)
+		result := make([]Certificate, 0, len(parsed))
+		for index, certificate := range parsed {
+			if certificate.certificate == nil {
+				continue
+			}
+			description := describe(path, index, certificate.certificate)
+			keystore := certificate.keystore
+			description.Keystore = &keystore
+			result = append(result, description)
+		}
+		return result, false, parseErr
 	}
 
 	parsed := parsePEM(data)

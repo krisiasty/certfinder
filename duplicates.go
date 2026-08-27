@@ -17,8 +17,9 @@ const (
 )
 
 type certificateLocation struct {
-	Path  string `json:"path"`
-	Index int    `json:"index"`
+	Path     string            `json:"path"`
+	Index    int               `json:"index"`
+	Keystore *jsonKeystoreInfo `json:"keystore,omitempty"`
 }
 
 type certificateGroup struct {
@@ -66,8 +67,9 @@ func groupCertificates(certificates []scanner.Certificate) []certificateGroup {
 			groups = append(groups, certificateGroup{Certificate: certificate})
 		}
 		groups[groupIndex].Locations = append(groups[groupIndex].Locations, certificateLocation{
-			Path:  certificate.Path,
-			Index: certificate.Index,
+			Path:     certificate.Path,
+			Index:    certificate.Index,
+			Keystore: newJSONKeystoreInfo(certificate.Keystore),
 		})
 	}
 	return groups
@@ -91,11 +93,29 @@ func printCertificateGroupAt(output io.Writer, group certificateGroup, now time.
 		return err
 	}
 	for _, location := range group.Locations {
-		if _, err := fmt.Fprintf(output, "    %s [index %d]\n", location.Path, location.Index); err != nil {
+		if _, err := fmt.Fprintln(output, "    "+formatCertificateLocation(location)); err != nil {
 			return err
 		}
 	}
-	return printCertificateDetailsAt(output, group.Certificate, now)
+	certificate := group.Certificate
+	certificate.Keystore = nil
+	return printCertificateDetailsAt(output, certificate, now)
+}
+
+func formatCertificateLocation(location certificateLocation) string {
+	result := fmt.Sprintf("%s [index %d]", location.Path, location.Index)
+	if location.Keystore == nil {
+		return result
+	}
+	return fmt.Sprintf(
+		"%s [keystore %s; alias %q; entry type %s; chain index %d; truststore %t]",
+		result,
+		location.Keystore.Format,
+		location.Keystore.Alias,
+		location.Keystore.EntryType,
+		location.Keystore.ChainIndex,
+		location.Keystore.Truststore,
+	)
 }
 
 func printJSONCertificateGroupsAt(output io.Writer, groups []certificateGroup, now time.Time) error {
@@ -104,6 +124,7 @@ func printJSONCertificateGroupsAt(output io.Writer, groups []certificateGroup, n
 		certificate := newJSONCertificate(group.Certificate, now)
 		certificate.Path = ""
 		certificate.Index = nil
+		certificate.Keystore = nil
 		result = append(result, jsonCertificateGroup{
 			Certificate: certificate,
 			Locations:   append([]certificateLocation{}, group.Locations...),

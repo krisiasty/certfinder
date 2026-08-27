@@ -793,6 +793,10 @@ func TestPrintCertificateIncludesIssuerAndValidity(t *testing.T) {
 		SPKISHA256Fingerprint: "ddeeff",
 		NotBefore:             time.Date(2026, time.January, 2, 3, 4, 5, 0, time.FixedZone("test", 3600)),
 		NotAfter:              time.Date(2027, time.January, 2, 3, 4, 5, 0, time.FixedZone("test", 3600)),
+		Keystore: &scanner.KeystoreInfo{
+			Format: scanner.KeystoreFormatJCEKS, Alias: "clé\x00😀", EntryType: scanner.KeystoreEntryPrivateKey,
+			ChainIndex: 1,
+		},
 	}, now)
 	if err != nil {
 		t.Fatal(err)
@@ -800,6 +804,11 @@ func TestPrintCertificateIncludesIssuerAndValidity(t *testing.T) {
 
 	wantParts := []string{
 		"/certificates/server.pem [index 2]\n",
+		"  Keystore format: JCEKS\n",
+		"  Keystore alias: \"clé\\x00😀\"\n",
+		"  Keystore entry type: PrivateKeyEntry\n",
+		"  Keystore chain index: 1\n",
+		"  Truststore: no\n",
 		"  Issuer: CN=Example Test CA\n",
 		"  Serial number: abc123\n",
 		"  Certificate type: leaf\n",
@@ -929,6 +938,10 @@ func TestPrintJSON(t *testing.T) {
 		SPKISHA256Fingerprint:        "ddeeff",
 		NotBefore:                    time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
 		NotAfter:                     time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC),
+		Keystore: &scanner.KeystoreInfo{
+			Format: scanner.KeystoreFormatJKS, Alias: "trusted-ca", EntryType: scanner.KeystoreEntryTrustedCert,
+			Truststore: true,
+		},
 	}
 	var output bytes.Buffer
 	if err := printJSONAt(
@@ -957,6 +970,12 @@ func TestPrintJSON(t *testing.T) {
 		`"valid_from": "2026-01-01T00:00:00Z"`,
 		`"valid_to": "2027-01-01T00:00:00Z"`,
 		`"validity_status": "valid"`,
+		`"keystore": {`,
+		`"format": "JKS"`,
+		`"alias": "trusted-ca"`,
+		`"entry_type": "trustedCertEntry"`,
+		`"chain_index": 0`,
+		`"truststore": true`,
 	}
 	for _, want := range wantParts {
 		if !strings.Contains(output.String(), want) {
