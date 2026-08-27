@@ -32,6 +32,9 @@ type scanConfiguration struct {
 	Hostname       string
 	Expiration     string
 	FailExpiring   string
+	Verify         bool
+	Roots          []string
+	RootsOnly      bool
 	IdentityMode   string
 	Output         string
 	Quiet          bool
@@ -127,6 +130,12 @@ func (display *progressDisplay) Start(configuration scanConfiguration) {
 		configuration.OneFileSystem,
 		configuration.FollowSymlinks,
 		configuration.IgnoreErrors,
+	)
+	display.writeProgress(
+		"Verification: enabled=%t roots=%s roots-only=%t\n",
+		configuration.Verify,
+		formatOptionList(configuration.Roots, "none"),
+		configuration.RootsOnly,
 	)
 	display.writeProgress("\n")
 	display.drawStatusLocked()

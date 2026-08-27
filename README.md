@@ -46,6 +46,9 @@ certfinder -usage=server -expiration=30d /etc/certificates
 certfinder -hostname=service.example.test /etc/certificates
 certfinder -hostname=192.0.2.10 -json /etc/certificates
 certfinder -expired /etc/certificates
+certfinder -verify /etc/certificates
+certfinder -verify -roots=/etc/private-ca.pem /srv/certificates
+certfinder -verify -roots=/etc/private-ca.pem -roots-only /srv/certificates
 certfinder -json /etc/certificates
 certfinder -jsonl -quiet /etc/certificates
 certfinder -unique /etc/certificates
@@ -184,6 +187,80 @@ names and left-most-label wildcards in certificate SANs. The supplied filter is 
 wildcard pattern, and the legacy Common Name is ignored. This filter composes with `-usage`, `-expiration`, and
 `-expired`, and selects the same certificates in text, JSON, and JSON Lines output.
 
+## Offline chain verification
+
+Chain verification is disabled by default. Pass `-verify` to verify every discovered certificate with Go's X.509
+verifier after the filesystem scan finishes. System roots are trusted by default, and all certificates found under
+the scan path are available as intermediates. Verification is entirely offline: `certfinder` does not fetch AIA
+issuers, roots, revocation lists, or OCSP responses.
+
+Use repeatable `-roots=PATH` options to add private trust anchors. Each path may name a certificate file, bundle,
+keystore, or directory and uses the same safe 64 KiB sniff followed by a full reread on a recognized certificate or
+keystore. Private roots augment the system roots by default. Add `-roots-only` to replace the system roots and trust
+only certificates loaded through `-roots`; this option requires at least one root path. An unreadable root path, a
+path with no certificates, or encrypted PKCS#12 content in a root path is a runtime error.
+
+The verification status is one of:
+
+- `trusted`: Go built at least one chain to a configured trust anchor.
+- `expired`: the target certificate or a certificate needed by its chain is expired.
+- `not-yet-valid`: the target certificate or a certificate needed by its chain is not valid yet.
+- `missing-intermediate`: verification reached an unknown, non-self-signed issuer.
+- `untrusted`: verification failed for another reason, including an unknown self-signed root or hostname mismatch.
+
+`missing-intermediate` is necessarily a heuristic because the verifier only knows which certificates were supplied.
+The exact Go verification error is always included and is authoritative. Successful results include every chain
+selected by Go, ordered from the certificate being reported to the trust anchor. Each chain entry includes its
+subject, issuer, SHA-256 certificate fingerprint, and whether it is the trust anchor.
+
+When `-hostname` is present, the same DNS name or IP address is passed to chain verification in addition to acting as
+an output filter. Verification accepts any extended key usage so `-usage` remains the separate, explicit purpose
+filter. `-verify` does not perform revocation checking and does not change the exit status based on trust; expiration
+monitoring remains controlled by `-fail-expired` and `-fail-expiring`.
+
+Verification depends on the complete discovered certificate set, so certificate output is buffered until the scan
+finishes. This also applies to `-jsonl` when combined with `-verify`; records remain newline-delimited but are emitted
+in deterministic scan-result order rather than immediately as workers finish.
+
+Text output adds verification details after the ordinary validity status:
+
+```text
+  Verification status: trusted
+  Verified chains: 1
+    Chain 0:
+      0: CN=service.example.test [sha256 57ddc5f785d733d2644396f55208842948a73c3b022346f106d43927be4bf8ee]
+      1: CN=Example Intermediate CA [sha256 b68f988b6ba6312b22761c44f42b83e520bcbc0f4ce19c64d8c76bd70113c579]
+      2: CN=Example Root CA [sha256 d89170c7d43b997eb51010ed9e0d67635dc74f42fe382e8f55f4c8222f731e29] (trust anchor)
+```
+
+JSON and JSON Lines add a `verification` object only when `-verify` is enabled:
+
+```json
+{
+  "verification": {
+    "status": "trusted",
+    "chains": [
+      [
+        {
+          "subject": "CN=service.example.test",
+          "issuer": "CN=Example Intermediate CA",
+          "sha256_fingerprint": "57ddc5f785d733d2644396f55208842948a73c3b022346f106d43927be4bf8ee",
+          "trust_anchor": false
+        },
+        {
+          "subject": "CN=Example Root CA",
+          "issuer": "CN=Example Root CA",
+          "sha256_fingerprint": "d89170c7d43b997eb51010ed9e0d67635dc74f42fe382e8f55f4c8222f731e29",
+          "trust_anchor": true
+        }
+      ]
+    ]
+  }
+}
+```
+
+Failed verification omits `chains` and adds an `error` string to the object.
+
 ## Expiration filtering versus monitoring
 
 The expiration flags form two separate pairs. The filter flags control which certificates are printed, while the
@@ -284,7 +361,8 @@ an abridged duplicate record looks like this:
 ## Progress
 
 At startup, `certfinder` writes its name, version, resolved scan path, worker count, and all effective scan and
-traversal options to stderr. A status line shows the number of files discovered and scanned, pending files,
+traversal and verification options to stderr. A status line shows the number of files discovered and scanned,
+pending files,
 certificates found, encrypted PKCS#12 contents, and whether directory discovery is complete. The periodic status
 refresh is limited to once every five seconds. The final summary also reports how many files were stopped at the
 `-max-bytes` sniffing limit without triggering a full reread. Certificate identity counts are calculated after
@@ -367,9 +445,10 @@ written after scanning finishes and is convenient when one complete, determinist
 Certificate records retain sorted path/index order; encrypted PKCS#12 records follow in sorted path/content order.
 
 Pass `-jsonl` to emit each matching certificate or encrypted-content finding immediately as one compact JSON object
-followed by a newline. JSON Lines output has no enclosing array, uses bounded certificate memory, and follows worker
-completion order rather than sorted path order. Complete lines remain usable if a scan is interrupted. A scan with no
-results emits no JSON Lines records. `-json` and `-jsonl` cannot be combined.
+followed by a newline. Without `-verify`, JSON Lines output has no enclosing array, uses bounded certificate memory,
+and follows worker completion order rather than sorted path order. Complete lines remain usable if a scan is
+interrupted. Verification requires buffered certificates and therefore emits JSON Lines certificate records only
+after the scan. A scan with no results emits no JSON Lines records. `-json` and `-jsonl` cannot be combined.
 
 For example, use `jq '.[]' results.json` with array JSON and `jq '.' results.jsonl` with JSON Lines. Runtime errors and
 warnings use structured `slog` text records on stderr, so structured stdout remains valid.
