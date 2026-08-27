@@ -32,6 +32,7 @@ type scanConfiguration struct {
 	Hostname       string
 	Expiration     string
 	FailExpiring   string
+	IdentityMode   string
 	Output         string
 	Quiet          bool
 }
@@ -44,12 +45,14 @@ type progressDisplay struct {
 	terminal          bool
 	started           time.Time
 
-	mu       sync.Mutex
-	progress scanner.Progress
-	stopped  bool
-	writeErr error
-	done     chan struct{}
-	wait     sync.WaitGroup
+	mu                 sync.Mutex
+	progress           scanner.Progress
+	identitySummary    certificateIdentitySummary
+	identitySummarySet bool
+	stopped            bool
+	writeErr           error
+	done               chan struct{}
+	wait               sync.WaitGroup
 }
 
 func newProgressDisplay(progressOutput, certificateOutput io.Writer, showCertificates, quiet bool) *progressDisplay {
@@ -98,17 +101,22 @@ func (display *progressDisplay) Start(configuration scanConfiguration) {
 	if output == "" {
 		output = outputText
 	}
+	identityMode := configuration.IdentityMode
+	if identityMode == "" {
+		identityMode = identityModeAll
+	}
 
 	display.writeProgress("%s %s\n", programName, buildinfo.Version())
 	display.writeProgress("Scan path: %s\n", path)
 	display.writeProgress("Workers: %d\n", configuration.Workers)
 	display.writeProgress(
-		"Options: max-bytes=%s usage=%s hostname=%s expiration=%s fail-expiring=%s output=%s quiet=%t\n",
+		"Options: max-bytes=%s usage=%s hostname=%s expiration=%s fail-expiring=%s identity=%s output=%s quiet=%t\n",
 		maxBytes,
 		usage,
 		hostname,
 		expiration,
 		failExpiring,
+		identityMode,
 		output,
 		configuration.Quiet,
 	)
@@ -150,6 +158,18 @@ func (display *progressDisplay) Update(progress scanner.Progress) {
 }
 
 func (display *progressDisplay) Certificate(certificate scanner.Certificate) {
+	display.writeCertificate(func(output io.Writer) error {
+		return printCertificate(output, certificate)
+	})
+}
+
+func (display *progressDisplay) CertificateGroup(group certificateGroup) {
+	display.writeCertificate(func(output io.Writer) error {
+		return printCertificateGroupAt(output, group, time.Now())
+	})
+}
+
+func (display *progressDisplay) writeCertificate(printResult func(io.Writer) error) {
 	display.mu.Lock()
 	defer display.mu.Unlock()
 	if display.stopped || !display.showCertificates {
@@ -159,12 +179,19 @@ func (display *progressDisplay) Certificate(certificate scanner.Certificate) {
 		display.clearStatusLocked()
 	}
 	if display.writeErr == nil {
-		display.writeErr = printCertificate(display.certificateOutput, certificate)
+		display.writeErr = printResult(display.certificateOutput)
 	}
 	if !display.quiet {
 		display.writeProgress("\n")
 		display.drawStatusLocked()
 	}
+}
+
+func (display *progressDisplay) SetIdentitySummary(summary certificateIdentitySummary) {
+	display.mu.Lock()
+	defer display.mu.Unlock()
+	display.identitySummary = summary
+	display.identitySummarySet = true
 }
 
 func (display *progressDisplay) Stop(completed bool) {
@@ -191,14 +218,27 @@ func (display *progressDisplay) Stop(completed bool) {
 	if completed {
 		state = "Scan complete"
 	}
+	identitySummary := ""
+	if display.identitySummarySet {
+		identitySummary = fmt.Sprintf(
+			" %d %s matched; %d unique %s; %d duplicate %s;",
+			display.identitySummary.Matched,
+			plural(display.identitySummary.Matched, "certificate", "certificates"),
+			display.identitySummary.Unique,
+			plural(display.identitySummary.Unique, "certificate", "certificates"),
+			display.identitySummary.DuplicateOccurrences,
+			plural(display.identitySummary.DuplicateOccurrences, "occurrence", "occurrences"),
+		)
+	}
 	display.writeProgress(
-		"%s: %d %s scanned, %d stopped at max-bytes; %d %s found; %d %s; elapsed %s\n",
+		"%s: %d %s scanned, %d stopped at max-bytes; %d %s found;%s %d %s; elapsed %s\n",
 		state,
 		display.progress.FilesScanned,
 		plural(display.progress.FilesScanned, "file", "files"),
 		display.progress.FilesCapped,
 		display.progress.CertificatesFound,
 		plural(display.progress.CertificatesFound, "certificate", "certificates"),
+		identitySummary,
 		display.progress.ScanErrors,
 		plural(display.progress.ScanErrors, "error", "errors"),
 		elapsed,

@@ -180,6 +180,165 @@ func TestRunRejectsConflictingJSONModes(t *testing.T) {
 	}
 }
 
+func TestRunRejectsConflictingIdentityModes(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	tests := []struct {
+		arguments []string
+		options   string
+	}{
+		{arguments: []string{"-unique", "-duplicates", directory}, options: "unique,duplicates"},
+		{arguments: []string{"-jsonl", "-unique", directory}, options: "jsonl,unique"},
+		{arguments: []string{"-jsonl", "-duplicates", directory}, options: "jsonl,duplicates"},
+	}
+	for _, test := range tests {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if status := run(context.Background(), test.arguments, &stdout, &stderr); status != exitUsageError {
+			t.Errorf("run(%v) status = %d, want %d", test.arguments, status, exitUsageError)
+		}
+		if !strings.Contains(stderr.String(), `options=`+test.options) {
+			t.Errorf("run(%v) error = %q, want options=%s", test.arguments, stderr.String(), test.options)
+		}
+	}
+}
+
+func TestRunDuplicateModesGroupFilesAndBundleEntries(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	duplicatePath, bundlePath, singletonPath := writeDuplicateTestFixture(t, directory)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	status := run(context.Background(), []string{"-duplicates", "-json", "-quiet", directory}, &stdout, &stderr)
+	if status != exitSuccess {
+		t.Fatalf("duplicates status = %d; stderr = %q", status, stderr.String())
+	}
+	var duplicateGroups []jsonCertificateGroup
+	if err := json.Unmarshal(stdout.Bytes(), &duplicateGroups); err != nil {
+		t.Fatalf("decode duplicate groups: %v; output = %q", err, stdout.String())
+	}
+	if len(duplicateGroups) != 1 {
+		t.Fatalf("duplicate groups = %+v, want one", duplicateGroups)
+	}
+	wantLocations := []certificateLocation{
+		{Path: duplicatePath, Index: 0},
+		{Path: bundlePath, Index: 0},
+		{Path: bundlePath, Index: 1},
+	}
+	if len(duplicateGroups[0].Locations) != len(wantLocations) {
+		t.Fatalf("locations = %+v, want %+v", duplicateGroups[0].Locations, wantLocations)
+	}
+	for index, location := range duplicateGroups[0].Locations {
+		if location != wantLocations[index] {
+			t.Errorf("location %d = %+v, want %+v", index, location, wantLocations[index])
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	status = run(context.Background(), []string{"-unique", "-json", "-quiet", directory}, &stdout, &stderr)
+	if status != exitSuccess {
+		t.Fatalf("unique status = %d; stderr = %q", status, stderr.String())
+	}
+	var uniqueGroups []jsonCertificateGroup
+	if err := json.Unmarshal(stdout.Bytes(), &uniqueGroups); err != nil {
+		t.Fatalf("decode unique groups: %v; output = %q", err, stdout.String())
+	}
+	if len(uniqueGroups) != 2 {
+		t.Fatalf("unique group count = %d, want 2", len(uniqueGroups))
+	}
+	if uniqueGroups[1].Locations[0].Path != singletonPath {
+		t.Errorf("singleton group = %+v, want path %q", uniqueGroups[1], singletonPath)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	status = run(context.Background(), []string{"-json", "-quiet", directory}, &stdout, &stderr)
+	if status != exitSuccess {
+		t.Fatalf("default JSON status = %d; stderr = %q", status, stderr.String())
+	}
+	var certificates []jsonCertificate
+	if err := json.Unmarshal(stdout.Bytes(), &certificates); err != nil {
+		t.Fatalf("decode default JSON: %v; output = %q", err, stdout.String())
+	}
+	if len(certificates) != 4 {
+		t.Fatalf("default JSON certificate count = %d, want 4", len(certificates))
+	}
+}
+
+func TestRunDuplicateModesTextAndFiltering(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	duplicatePath, bundlePath, singletonPath := writeDuplicateTestFixture(t, directory)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	status := run(context.Background(), []string{"-duplicates", "-quiet", directory}, &stdout, &stderr)
+	if status != exitSuccess {
+		t.Fatalf("duplicates status = %d; stderr = %q", status, stderr.String())
+	}
+	for _, wanted := range []string{
+		duplicatePath + " [index 0]",
+		bundlePath + " [index 0]",
+		bundlePath + " [index 1]",
+	} {
+		if !strings.Contains(stdout.String(), wanted) {
+			t.Errorf("duplicate text %q does not contain %q", stdout.String(), wanted)
+		}
+	}
+	if strings.Contains(stdout.String(), singletonPath) {
+		t.Errorf("duplicate text %q contains singleton path %q", stdout.String(), singletonPath)
+	}
+	if count := strings.Count(stdout.String(), "  SHA-256 fingerprint:"); count != 1 {
+		t.Errorf("duplicate text contains %d SHA-256 fingerprints, want 1: %q", count, stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	status = run(
+		context.Background(),
+		[]string{"-unique", "-usage=client", "-json", "-quiet", directory},
+		&stdout,
+		&stderr,
+	)
+	if status != exitSuccess {
+		t.Fatalf("filtered unique status = %d; stderr = %q", status, stderr.String())
+	}
+	var groups []jsonCertificateGroup
+	if err := json.Unmarshal(stdout.Bytes(), &groups); err != nil {
+		t.Fatalf("decode filtered groups: %v; output = %q", err, stdout.String())
+	}
+	if len(groups) != 1 || len(groups[0].Locations) != 1 || groups[0].Locations[0].Path != singletonPath {
+		t.Fatalf("filtered groups = %+v, want only %q", groups, singletonPath)
+	}
+}
+
+func TestRunSummaryIncludesCertificateIdentityCounts(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	writeDuplicateTestFixture(t, directory)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if status := run(context.Background(), []string{directory}, &stdout, &stderr); status != exitSuccess {
+		t.Fatalf("status = %d; stderr = %q", status, stderr.String())
+	}
+	want := "4 certificates found; 4 certificates matched; 2 unique certificates; 2 duplicate occurrences;"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("summary %q does not contain %q", stderr.String(), want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if status := run(context.Background(), []string{"-usage=client", directory}, &stdout, &stderr); status != exitSuccess {
+		t.Fatalf("filtered status = %d; stderr = %q", status, stderr.String())
+	}
+	want = "4 certificates found; 1 certificate matched; 1 unique certificate; 0 duplicate occurrences;"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("filtered summary %q does not contain %q", stderr.String(), want)
+	}
+}
+
 func TestRunQuietSuppressesProgressButPreservesErrors(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer
@@ -809,6 +968,39 @@ func writeTestCertificateWithSANs(
 		t.Fatal(err)
 	}
 	return certificatePath
+}
+
+func writeDuplicateTestFixture(t *testing.T, directory string) (string, string, string) {
+	t.Helper()
+	now := time.Now()
+	duplicatePath := writeTestCertificate(
+		t,
+		directory,
+		"a-duplicate.pem",
+		now.Add(-time.Hour),
+		now.Add(time.Hour),
+		x509.ExtKeyUsageServerAuth,
+	)
+	certificatePEM, err := os.ReadFile(duplicatePath) //nolint:gosec // The test path is confined to t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(directory, "b-bundle.pem")
+	bundle := make([]byte, 0, len(certificatePEM)*2)
+	bundle = append(bundle, certificatePEM...)
+	bundle = append(bundle, certificatePEM...)
+	if err := os.WriteFile(bundlePath, bundle, 0o600); err != nil { //nolint:gosec // The test path is confined to t.TempDir.
+		t.Fatal(err)
+	}
+	singletonPath := writeTestCertificate(
+		t,
+		directory,
+		"c-singleton.pem",
+		now.Add(-time.Hour),
+		now.Add(time.Hour),
+		x509.ExtKeyUsageClientAuth,
+	)
+	return duplicatePath, bundlePath, singletonPath
 }
 
 type errorWriter struct{}
