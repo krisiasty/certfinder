@@ -4,6 +4,8 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/rsa"
 	"crypto/sha1" //nolint:gosec // SHA-1 is emitted only as a compatibility fingerprint.
 	"crypto/sha256"
 	"crypto/x509"
@@ -30,6 +32,13 @@ const (
 	// Options disables the initial limit.
 	DefaultMaxBytes int64 = 64 << 10
 	maxWorkers            = 8
+)
+
+// Certificate validity states.
+const (
+	ValidityValid       = "valid"
+	ValidityExpired     = "expired"
+	ValidityNotYetValid = "not-yet-valid"
 )
 
 // Extended key usage filter names accepted by the scanner.
@@ -77,14 +86,33 @@ type Certificate struct {
 	Index                        int
 	Subject                      string
 	Issuer                       string
+	SerialNumber                 string
+	IsCA                         bool
+	SelfSigned                   bool
 	SANs                         []string
+	KeyUsage                     []string
 	ExtendedKeyUsage             []string
 	ExtendedKeyUsageUnrestricted bool
+	PublicKeyAlgorithm           string
+	PublicKeyBits                int
+	PublicKeyCurve               string
+	SignatureAlgorithm           string
 	SHA1Fingerprint              string
 	SHA256Fingerprint            string
 	SPKISHA256Fingerprint        string
 	NotBefore                    time.Time
 	NotAfter                     time.Time
+}
+
+// ValidityStatus returns the certificate validity state at the supplied time.
+func (certificate Certificate) ValidityStatus(at time.Time) string {
+	if at.Before(certificate.NotBefore) {
+		return ValidityNotYetValid
+	}
+	if at.After(certificate.NotAfter) {
+		return ValidityExpired
+	}
+	return ValidityValid
 }
 
 // FileError is a non-fatal error encountered while scanning one path.
@@ -397,6 +425,7 @@ func parsePEM(data []byte) []*x509.Certificate {
 
 func describe(path string, index int, certificate *x509.Certificate) Certificate {
 	usages, unrestricted := formatExtendedKeyUsage(certificate)
+	publicKeyAlgorithm, publicKeyBits, publicKeyCurve := describePublicKey(certificate)
 	sha1Fingerprint := sha1.Sum(certificate.Raw) //nolint:gosec // SHA-1 is required as an ecosystem-compatible certificate identifier.
 	sha256Fingerprint := sha256.Sum256(certificate.Raw)
 	spkiSHA256Fingerprint := sha256.Sum256(certificate.RawSubjectPublicKeyInfo)
@@ -405,15 +434,94 @@ func describe(path string, index int, certificate *x509.Certificate) Certificate
 		Index:                        index,
 		Subject:                      certificate.Subject.String(),
 		Issuer:                       certificate.Issuer.String(),
+		SerialNumber:                 formatSerialNumber(certificate),
+		IsCA:                         certificate.IsCA,
+		SelfSigned:                   isSelfSigned(certificate),
 		SANs:                         formatSANs(certificate.DNSNames, certificate.IPAddresses, certificate.EmailAddresses, certificate.URIs),
+		KeyUsage:                     formatKeyUsage(certificate.KeyUsage),
 		ExtendedKeyUsage:             usages,
 		ExtendedKeyUsageUnrestricted: unrestricted,
+		PublicKeyAlgorithm:           publicKeyAlgorithm,
+		PublicKeyBits:                publicKeyBits,
+		PublicKeyCurve:               publicKeyCurve,
+		SignatureAlgorithm:           signatureAlgorithmName(certificate.SignatureAlgorithm),
 		SHA1Fingerprint:              hex.EncodeToString(sha1Fingerprint[:]),
 		SHA256Fingerprint:            hex.EncodeToString(sha256Fingerprint[:]),
 		SPKISHA256Fingerprint:        hex.EncodeToString(spkiSHA256Fingerprint[:]),
 		NotBefore:                    certificate.NotBefore,
 		NotAfter:                     certificate.NotAfter,
 	}
+}
+
+func formatSerialNumber(certificate *x509.Certificate) string {
+	if certificate.SerialNumber == nil {
+		return ""
+	}
+	return certificate.SerialNumber.Text(16)
+}
+
+func isSelfSigned(certificate *x509.Certificate) bool {
+	if !bytes.Equal(certificate.RawSubject, certificate.RawIssuer) {
+		return false
+	}
+	return certificate.CheckSignature(
+		certificate.SignatureAlgorithm,
+		certificate.RawTBSCertificate,
+		certificate.Signature,
+	) == nil
+}
+
+func describePublicKey(certificate *x509.Certificate) (algorithm string, bits int, curve string) {
+	algorithm = publicKeyAlgorithmName(certificate.PublicKeyAlgorithm)
+	switch publicKey := certificate.PublicKey.(type) {
+	case *rsa.PublicKey:
+		if publicKey != nil && publicKey.N != nil {
+			bits = publicKey.N.BitLen()
+		}
+	case *ecdsa.PublicKey:
+		if publicKey != nil && publicKey.Curve != nil && publicKey.Params() != nil {
+			curve = publicKey.Params().Name
+		}
+	}
+	return algorithm, bits, curve
+}
+
+func publicKeyAlgorithmName(algorithm x509.PublicKeyAlgorithm) string {
+	if algorithm == x509.UnknownPublicKeyAlgorithm {
+		return "unknown"
+	}
+	return algorithm.String()
+}
+
+func signatureAlgorithmName(algorithm x509.SignatureAlgorithm) string {
+	if algorithm == x509.UnknownSignatureAlgorithm {
+		return "unknown"
+	}
+	return algorithm.String()
+}
+
+func formatKeyUsage(usage x509.KeyUsage) []string {
+	names := []struct {
+		value x509.KeyUsage
+		name  string
+	}{
+		{x509.KeyUsageDigitalSignature, "digital-signature"},
+		{x509.KeyUsageContentCommitment, "content-commitment"},
+		{x509.KeyUsageKeyEncipherment, "key-encipherment"},
+		{x509.KeyUsageDataEncipherment, "data-encipherment"},
+		{x509.KeyUsageKeyAgreement, "key-agreement"},
+		{x509.KeyUsageCertSign, "certificate-signing"},
+		{x509.KeyUsageCRLSign, "crl-signing"},
+		{x509.KeyUsageEncipherOnly, "encipher-only"},
+		{x509.KeyUsageDecipherOnly, "decipher-only"},
+	}
+	result := make([]string, 0, len(names))
+	for _, candidate := range names {
+		if usage&candidate.value != 0 {
+			result = append(result, candidate.name)
+		}
+	}
+	return result
 }
 
 func formatExtendedKeyUsage(certificate *x509.Certificate) ([]string, bool) {

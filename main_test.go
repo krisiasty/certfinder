@@ -80,30 +80,45 @@ func TestRunRejectsConflictingExpirationFilters(t *testing.T) {
 func TestPrintCertificateIncludesIssuerAndValidity(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
-	err := printCertificate(&output, scanner.Certificate{
+	now := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	err := printCertificateAt(&output, scanner.Certificate{
 		Path:                  "/certificates/server.pem",
 		Subject:               "CN=server.example",
 		Issuer:                "CN=Example Test CA",
+		SerialNumber:          "abc123",
+		IsCA:                  false,
+		SelfSigned:            false,
 		SANs:                  []string{"DNS:server.example"},
+		KeyUsage:              []string{"digital-signature", "key-encipherment"},
 		ExtendedKeyUsage:      []string{scanner.UsageServer},
+		PublicKeyAlgorithm:    "RSA",
+		PublicKeyBits:         2048,
+		SignatureAlgorithm:    "SHA256-RSA",
 		SHA1Fingerprint:       "112233",
 		SHA256Fingerprint:     "aabbcc",
 		SPKISHA256Fingerprint: "ddeeff",
 		NotBefore:             time.Date(2026, time.January, 2, 3, 4, 5, 0, time.FixedZone("test", 3600)),
 		NotAfter:              time.Date(2027, time.January, 2, 3, 4, 5, 0, time.FixedZone("test", 3600)),
-	})
+	}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	wantParts := []string{
 		"  Issuer: CN=Example Test CA\n",
+		"  Serial number: abc123\n",
+		"  Certificate type: leaf\n",
+		"  Self-signed: no\n",
+		"  Key usage: digital-signature, key-encipherment\n",
 		"  Extended key usage: server\n",
+		"  Public key: RSA (2048 bits)\n",
+		"  Signature algorithm: SHA256-RSA\n",
 		"  SHA-1 fingerprint: 112233\n",
 		"  SHA-256 fingerprint: aabbcc\n",
 		"  SPKI SHA-256 fingerprint: ddeeff\n",
 		"  Valid from: 2026-01-02T02:04:05Z\n",
 		"  Valid to: 2027-01-02T02:04:05Z\n",
+		"  Validity status: valid\n",
 	}
 	for _, want := range wantParts {
 		if !strings.Contains(output.String(), want) {
@@ -203,9 +218,16 @@ func TestPrintJSON(t *testing.T) {
 		Path:                         "/certificates/server.pem",
 		Subject:                      "CN=server.example",
 		Issuer:                       "CN=Example Test CA",
+		SerialNumber:                 "abc123",
+		IsCA:                         true,
+		SelfSigned:                   true,
 		SANs:                         []string{"DNS:server.example"},
+		KeyUsage:                     []string{"certificate-signing", "crl-signing"},
 		ExtendedKeyUsage:             []string{scanner.UsageServer},
 		ExtendedKeyUsageUnrestricted: false,
+		PublicKeyAlgorithm:           "ECDSA",
+		PublicKeyCurve:               "P-256",
+		SignatureAlgorithm:           "ECDSA-SHA256",
 		SHA1Fingerprint:              "112233",
 		SHA256Fingerprint:            "aabbcc",
 		SPKISHA256Fingerprint:        "ddeeff",
@@ -213,18 +235,31 @@ func TestPrintJSON(t *testing.T) {
 		NotAfter:                     time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC),
 	}
 	var output bytes.Buffer
-	if err := printJSON(&output, []scanner.Certificate{certificate}); err != nil {
+	if err := printJSONAt(
+		&output,
+		[]scanner.Certificate{certificate},
+		time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC),
+	); err != nil {
 		t.Fatal(err)
 	}
 	wantParts := []string{
 		`"path": "/certificates/server.pem"`,
+		`"serial_number": "abc123"`,
+		`"is_ca": true`,
+		`"self_signed": true`,
+		`"key_usage": [`,
 		`"extended_key_usage": [`,
+		`"public_key": {`,
+		`"algorithm": "ECDSA"`,
+		`"curve": "P-256"`,
+		`"signature_algorithm": "ECDSA-SHA256"`,
 		`"fingerprints": {`,
 		`"sha1": "112233"`,
 		`"sha256": "aabbcc"`,
 		`"spki_sha256": "ddeeff"`,
 		`"valid_from": "2026-01-01T00:00:00Z"`,
 		`"valid_to": "2027-01-01T00:00:00Z"`,
+		`"validity_status": "valid"`,
 	}
 	for _, want := range wantParts {
 		if !strings.Contains(output.String(), want) {
