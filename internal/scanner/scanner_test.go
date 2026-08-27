@@ -265,6 +265,185 @@ func TestScanFollowsRootDirectorySymlinkOnce(t *testing.T) {
 	}
 }
 
+func TestScanAppliesExclusionsBeforeDescending(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	_, certificatePEM, _ := makeCertificate(t, certificateSpec{serial: 30, common: "included.example"})
+	includedPath := filepath.Join(root, "services", "included.pem")
+	if err := os.MkdirAll(filepath.Dir(includedPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, includedPath, certificatePEM)
+
+	excludedDirectory := filepath.Join(root, "nested", "cache")
+	if err := os.MkdirAll(excludedDirectory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(excludedDirectory, "excluded.pem"), certificatePEM)
+	if err := os.Symlink(filepath.Join(root, "missing-target"), filepath.Join(excludedDirectory, "broken")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	writeFile(t, filepath.Join(root, "services", "ignored.skip"), certificatePEM)
+
+	report, err := Scan(context.Background(), root, Options{
+		MaxBytes:       DefaultMaxBytes,
+		Workers:        2,
+		Exclude:        []string{"cache", "services/*.skip"},
+		FollowSymlinks: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) != 0 {
+		t.Fatalf("excluded directory was traversed: %v", report.Errors)
+	}
+	if len(report.Certificates) != 1 || report.Certificates[0].Path != includedPath {
+		t.Fatalf("excluded scan = %+v, want only %s", report.Certificates, includedPath)
+	}
+}
+
+func TestScanFiltersExtensionsCaseInsensitively(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	_, certificatePEM, _ := makeCertificate(t, certificateSpec{serial: 31, common: "extension.example"})
+	pemPath := filepath.Join(root, "server.PEM")
+	crtPath := filepath.Join(root, "client.crt")
+	writeFile(t, pemPath, certificatePEM)
+	writeFile(t, crtPath, certificatePEM)
+	writeFile(t, filepath.Join(root, "ignored.data"), certificatePEM)
+
+	report, err := Scan(context.Background(), root, Options{
+		MaxBytes:   DefaultMaxBytes,
+		Workers:    2,
+		Extensions: []string{"pem", ".CRT", ".pem"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPaths := []string{crtPath, pemPath}
+	if len(report.Certificates) != len(wantPaths) {
+		t.Fatalf("extension-filtered scan found %+v, want paths %v", report.Certificates, wantPaths)
+	}
+	for index, wantPath := range wantPaths {
+		if report.Certificates[index].Path != wantPath {
+			t.Errorf("certificate %d path = %s, want %s", index, report.Certificates[index].Path, wantPath)
+		}
+	}
+}
+
+func TestScanStaysOnInjectedRootFilesystem(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	_, certificatePEM, _ := makeCertificate(t, certificateSpec{serial: 32, common: "filesystem.example"})
+	localPath := filepath.Join(root, "local.pem")
+	writeFile(t, localPath, certificatePEM)
+	otherDirectory := filepath.Join(root, "other-filesystem")
+	if err := os.Mkdir(otherDirectory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(otherDirectory, "excluded.pem"), certificatePEM)
+
+	report, err := Scan(context.Background(), root, Options{
+		MaxBytes:      DefaultMaxBytes,
+		Workers:       2,
+		OneFileSystem: true,
+		filesystemID: func(info os.FileInfo) (uint64, bool) {
+			if info.Name() == "other-filesystem" {
+				return 2, true
+			}
+			return 1, true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Certificates) != 1 || report.Certificates[0].Path != localPath {
+		t.Fatalf("one-filesystem scan = %+v, want only %s", report.Certificates, localPath)
+	}
+}
+
+func TestScanRejectsOneFilesystemWhenIdentityIsUnavailable(t *testing.T) {
+	t.Parallel()
+	_, err := Scan(context.Background(), t.TempDir(), Options{
+		OneFileSystem: true,
+		filesystemID: func(os.FileInfo) (uint64, bool) {
+			return 0, false
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "one-file-system is not supported") {
+		t.Fatalf("unsupported one-filesystem error = %v", err)
+	}
+}
+
+func TestScanFollowsDirectorySymlinksWithoutCycles(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	external := t.TempDir()
+	_, certificatePEM, _ := makeCertificate(t, certificateSpec{serial: 33, common: "linked-directory.example"})
+	writeFile(t, filepath.Join(external, "linked.pem"), certificatePEM)
+	if err := os.Symlink(external, filepath.Join(root, "external")); err != nil {
+		t.Skipf("cannot create directory symlink: %v", err)
+	}
+	if err := os.Symlink(root, filepath.Join(external, "back-to-root")); err != nil {
+		t.Skipf("cannot create cycle symlink: %v", err)
+	}
+
+	withoutFollowing, err := Scan(context.Background(), root, Options{MaxBytes: DefaultMaxBytes, Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withoutFollowing.Certificates) != 0 || len(withoutFollowing.Errors) != 0 {
+		t.Fatalf("default scan followed a symlink: %+v", withoutFollowing)
+	}
+
+	report, err := Scan(context.Background(), root, Options{
+		MaxBytes:       DefaultMaxBytes,
+		Workers:        2,
+		FollowSymlinks: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := filepath.Join(root, "external", "linked.pem")
+	if len(report.Errors) != 0 {
+		t.Fatalf("symlink scan errors = %v", report.Errors)
+	}
+	if len(report.Certificates) != 1 || report.Certificates[0].Path != wantPath {
+		t.Fatalf("symlink scan = %+v, want one certificate at %s", report.Certificates, wantPath)
+	}
+}
+
+func TestScanReportsBrokenFollowedSymlink(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	brokenPath := filepath.Join(root, "broken.pem")
+	if err := os.Symlink(filepath.Join(root, "missing.pem"), brokenPath); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	report, err := Scan(context.Background(), root, Options{FollowSymlinks: true, Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) != 1 || report.Errors[0].Path != brokenPath {
+		t.Fatalf("broken-symlink errors = %+v, want one error for %s", report.Errors, brokenPath)
+	}
+}
+
+func TestScanRejectsInvalidTraversalOptions(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if _, err := Scan(context.Background(), root, Options{Exclude: []string{"["}}); err == nil {
+		t.Fatal("invalid exclude pattern did not return an error")
+	}
+	if _, err := Scan(context.Background(), root, Options{Extensions: []string{"path/cert"}}); err == nil {
+		t.Fatal("invalid extension did not return an error")
+	}
+	if _, err := Scan(context.Background(), root, Options{Extensions: []string{"*.pem"}}); err == nil {
+		t.Fatal("glob extension did not return an error")
+	}
+}
+
 func TestScanReportsCertificateHealth(t *testing.T) {
 	t.Parallel()
 	_, certificatePEM, _ := makeCertificate(t, certificateSpec{

@@ -44,6 +44,10 @@ certfinder -max-bytes 8388608 -workers 4 .
 certfinder -usage=server -expiration=30d /etc/certificates
 certfinder -expired /etc/certificates
 certfinder -json /etc/certificates
+certfinder -exclude=.git -exclude='build/*' .
+certfinder -extensions=.pem,.crt -extensions=cer /etc
+certfinder -one-file-system -ignore-errors /
+certfinder -follow-symlinks /etc/services
 ```
 
 Use `--version` to print the version, commit, and build timestamp.
@@ -69,12 +73,32 @@ Use `-expiration=30d` to print certificates that are already expired or will exp
 duration units, such as `48h` or `90m`, are also accepted. `-expired` is a shortcut for `-expiration=0d`. The two
 flags cannot be combined.
 
-Directory symlinks are not followed. When `PATH` itself is a symlink to a regular file or directory, it is followed
-once.
+## Filesystem traversal
+
+Use repeatable `-exclude=GLOB` options to skip files or prune directories before they are traversed. Patterns are
+matched against paths relative to the scan root using `/` separators on every operating system. A pattern containing
+`/` matches the complete relative path. A pattern without `/`, such as `.git` or `cache`, matches a file or directory
+name at any depth. Globs use Go `path.Match` syntax: `*`, `?`, and character classes do not cross `/` separators.
+
+Use `-extensions=.pem,.crt` to scan only files with the listed final extensions. The flag is case-insensitive, accepts
+extensions with or without a leading dot, and may be repeated. Extension filtering is disabled by default because a
+valid certificate can have any filename.
+
+Directory and file symlinks encountered below `PATH` are skipped by default. `-follow-symlinks` follows them while
+tracking canonical directory targets, preventing cycles and scanning each target directory at most once. When `PATH`
+itself is a symlink to a regular file or directory, it is always followed once.
+
+On Linux and macOS, `-one-file-system` compares device identifiers and skips files and directory trees located on a
+different filesystem from `PATH`. Other platforms return a clear unsupported-option error when the flag is used.
+
+By default, any file or traversal error makes the command exit unsuccessfully after all accessible files have been
+scanned. `-ignore-errors` preserves warnings and the final error count but returns success for these non-fatal errors.
+Invalid options and failures inspecting the scan root remain fatal.
 
 ## Progress
 
-At startup, `certfinder` writes its name, version, resolved scan path, worker count, and effective options to stderr.
+At startup, `certfinder` writes its name, version, resolved scan path, worker count, and all effective scan and
+traversal options to stderr.
 A status line shows the number of files discovered and scanned, pending files, certificates found, and whether
 directory discovery is complete. The periodic status refresh is limited to once every five seconds. The final
 summary also reports how many files were stopped at the `-max-bytes` sniffing limit without triggering a full reread.

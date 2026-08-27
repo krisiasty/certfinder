@@ -17,10 +17,12 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,10 +65,15 @@ var pemBegin = []byte("-----BEGIN CERTIFICATE-----")
 
 // Options controls a filesystem scan.
 type Options struct {
-	MaxBytes      int64
-	Workers       int
-	OnProgress    func(Progress)
-	OnCertificate func(Certificate)
+	MaxBytes       int64
+	Workers        int
+	Exclude        []string
+	Extensions     []string
+	OneFileSystem  bool
+	FollowSymlinks bool
+	OnProgress     func(Progress)
+	OnCertificate  func(Certificate)
+	filesystemID   func(os.FileInfo) (uint64, bool)
 }
 
 // Progress is a point-in-time snapshot of a running scan. Callbacks may be
@@ -152,8 +159,8 @@ type progressCounters struct {
 	discoveryComplete atomic.Bool
 }
 
-// Scan recursively scans root. It follows root itself when root is a symlink,
-// but does not follow symlinks found while traversing a directory.
+// Scan recursively scans root. It always follows root itself when root is a
+// symlink. Other symlinks are followed only when FollowSymlinks is enabled.
 func Scan(ctx context.Context, root string, options Options) (Report, error) {
 	if root == "" {
 		return Report{}, errors.New("scan path is empty")
@@ -166,6 +173,18 @@ func Scan(ctx context.Context, root string, options Options) (Report, error) {
 	}
 	if options.Workers == 0 {
 		options.Workers = min(runtime.GOMAXPROCS(0), maxWorkers)
+	}
+	var err error
+	options.Exclude, err = normalizeExcludePatterns(options.Exclude)
+	if err != nil {
+		return Report{}, err
+	}
+	options.Extensions, err = normalizeExtensions(options.Extensions)
+	if err != nil {
+		return Report{}, err
+	}
+	if options.filesystemID == nil {
+		options.filesystemID = platformFilesystemID
 	}
 
 	info, err := os.Stat(root)
@@ -180,6 +199,14 @@ func Scan(ctx context.Context, root string, options Options) (Report, error) {
 		walkRoot, err = filepath.EvalSymlinks(root)
 		if err != nil {
 			return Report{}, fmt.Errorf("resolve %q: %w", root, err)
+		}
+	}
+	var rootFilesystem uint64
+	if options.OneFileSystem {
+		var supported bool
+		rootFilesystem, supported = options.filesystemID(info)
+		if !supported {
+			return Report{}, fmt.Errorf("one-file-system is not supported on %s", runtime.GOOS)
 		}
 	}
 
@@ -199,48 +226,25 @@ func Scan(ctx context.Context, root string, options Options) (Report, error) {
 	go func() {
 		defer close(jobs)
 		if info.Mode().IsRegular() {
-			counters.filesDiscovered.Add(1)
-			notifyProgress(options.OnProgress, &counters)
-			if !sendPath(ctx, jobs, root) {
-				counters.filesDiscovered.Add(-1)
+			relative := filepath.ToSlash(filepath.Base(root))
+			if !isExcluded(relative, options.Exclude) && matchesExtension(root, options.Extensions) {
+				queuePath(ctx, root, jobs, &counters, options.OnProgress)
 			}
 			counters.discoveryComplete.Store(true)
 			notifyProgress(options.OnProgress, &counters)
 			return
 		}
-
-		_ = filepath.WalkDir(walkRoot, func(path string, entry os.DirEntry, walkErr error) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			displayPath := path
-			if walkRoot != root {
-				relative, relativeErr := filepath.Rel(walkRoot, path)
-				if relativeErr == nil {
-					displayPath = filepath.Join(root, relative)
-				}
-			}
-			if walkErr != nil {
-				if !sendOutcome(ctx, outcomes, outcome{err: &FileError{Path: displayPath, Err: walkErr}}) {
-					return ctx.Err()
-				}
-				if entry != nil && entry.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if entry.Type().IsRegular() {
-				discovered := counters.filesDiscovered.Add(1)
-				if discovered == 1 || discovered%100 == 0 {
-					notifyProgress(options.OnProgress, &counters)
-				}
-				if !sendPath(ctx, jobs, displayPath) {
-					counters.filesDiscovered.Add(-1)
-					return ctx.Err()
-				}
-			}
-			return nil
-		})
+		walker := discoveryWalker{
+			ctx:            ctx,
+			root:           root,
+			walkRoot:       walkRoot,
+			options:        options,
+			rootFilesystem: rootFilesystem,
+			jobs:           jobs,
+			outcomes:       outcomes,
+			counters:       &counters,
+		}
+		walker.walk()
 		counters.discoveryComplete.Store(true)
 		notifyProgress(options.OnProgress, &counters)
 	}()
@@ -281,6 +285,282 @@ func Scan(ctx context.Context, root string, options Options) (Report, error) {
 			return Report{}, ctx.Err()
 		}
 	}
+}
+
+type discoveryWalker struct {
+	ctx            context.Context
+	root           string
+	walkRoot       string
+	options        Options
+	rootFilesystem uint64
+	jobs           chan<- string
+	outcomes       chan<- outcome
+	counters       *progressCounters
+	visited        map[string]struct{}
+}
+
+func (walker *discoveryWalker) walk() {
+	if walker.options.FollowSymlinks {
+		walker.walkWithSymlinks()
+		return
+	}
+	_ = filepath.WalkDir(walker.walkRoot, walker.visitWithoutSymlinks)
+}
+
+func (walker *discoveryWalker) visitWithoutSymlinks(filePath string, entry os.DirEntry, walkErr error) error {
+	if err := walker.ctx.Err(); err != nil {
+		return err
+	}
+	displayPath, relative := walker.paths(filePath)
+	if walkErr != nil {
+		if !walker.reportError(displayPath, walkErr) {
+			return walker.ctx.Err()
+		}
+		if entry != nil && entry.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	if relative != "." && isExcluded(relative, walker.options.Exclude) {
+		if entry.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	if entry.IsDir() {
+		if relative != "." && !walker.entryOnRootFilesystem(displayPath, entry) {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	if !entry.Type().IsRegular() || !matchesExtension(displayPath, walker.options.Extensions) {
+		return nil
+	}
+	if !walker.entryOnRootFilesystem(displayPath, entry) {
+		return nil
+	}
+	if !queuePath(walker.ctx, displayPath, walker.jobs, walker.counters, walker.options.OnProgress) {
+		return walker.ctx.Err()
+	}
+	return nil
+}
+
+func (walker *discoveryWalker) walkWithSymlinks() {
+	physicalRoot, err := filepath.Abs(walker.walkRoot)
+	if err != nil {
+		walker.reportError(walker.root, err)
+		return
+	}
+	physicalRoot, err = filepath.EvalSymlinks(physicalRoot)
+	if err != nil {
+		walker.reportError(walker.root, err)
+		return
+	}
+	physicalRoot = filepath.Clean(physicalRoot)
+	walker.visited = map[string]struct{}{physicalRoot: {}}
+	walker.walkDirectory(physicalRoot, walker.root, "")
+}
+
+func (walker *discoveryWalker) walkDirectory(physicalDirectory, displayDirectory, relativeDirectory string) bool {
+	if walker.ctx.Err() != nil {
+		return false
+	}
+	entries, err := os.ReadDir(physicalDirectory)
+	if err != nil {
+		return walker.reportError(displayDirectory, err)
+	}
+	for _, entry := range entries {
+		if walker.ctx.Err() != nil {
+			return false
+		}
+		displayPath := filepath.Join(displayDirectory, entry.Name())
+		physicalPath := filepath.Join(physicalDirectory, entry.Name())
+		relative := path.Join(relativeDirectory, entry.Name())
+		if isExcluded(relative, walker.options.Exclude) {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if !walker.visitSymlink(physicalPath, displayPath, relative) {
+				return false
+			}
+			continue
+		}
+		if entry.IsDir() {
+			if !walker.entryOnRootFilesystem(displayPath, entry) {
+				continue
+			}
+			physicalPath = filepath.Clean(physicalPath)
+			if walker.markVisited(physicalPath) && !walker.walkDirectory(physicalPath, displayPath, relative) {
+				return false
+			}
+			continue
+		}
+		if !entry.Type().IsRegular() || !matchesExtension(displayPath, walker.options.Extensions) {
+			continue
+		}
+		if !walker.entryOnRootFilesystem(displayPath, entry) {
+			continue
+		}
+		if !queuePath(walker.ctx, displayPath, walker.jobs, walker.counters, walker.options.OnProgress) {
+			return false
+		}
+	}
+	return true
+}
+
+func (walker *discoveryWalker) visitSymlink(physicalPath, displayPath, relative string) bool {
+	info, err := os.Stat(physicalPath)
+	if err != nil {
+		return walker.reportError(displayPath, err)
+	}
+	if !walker.infoOnRootFilesystem(displayPath, info) {
+		return true
+	}
+	if info.IsDir() {
+		resolved, err := filepath.EvalSymlinks(physicalPath)
+		if err != nil {
+			return walker.reportError(displayPath, err)
+		}
+		resolved, err = filepath.Abs(resolved)
+		if err != nil {
+			return walker.reportError(displayPath, err)
+		}
+		resolved = filepath.Clean(resolved)
+		if walker.markVisited(resolved) {
+			return walker.walkDirectory(resolved, displayPath, relative)
+		}
+		return true
+	}
+	if !info.Mode().IsRegular() || !matchesExtension(displayPath, walker.options.Extensions) {
+		return true
+	}
+	return queuePath(walker.ctx, displayPath, walker.jobs, walker.counters, walker.options.OnProgress)
+}
+
+func (walker *discoveryWalker) paths(filePath string) (displayPath, relative string) {
+	relativePath, err := filepath.Rel(walker.walkRoot, filePath)
+	if err != nil {
+		return filePath, "."
+	}
+	displayPath = filePath
+	if walker.walkRoot != walker.root {
+		displayPath = filepath.Join(walker.root, relativePath)
+	}
+	return displayPath, filepath.ToSlash(relativePath)
+}
+
+func (walker *discoveryWalker) entryOnRootFilesystem(displayPath string, entry os.DirEntry) bool {
+	if !walker.options.OneFileSystem {
+		return true
+	}
+	info, err := entry.Info()
+	if err != nil {
+		walker.reportError(displayPath, err)
+		return false
+	}
+	return walker.infoOnRootFilesystem(displayPath, info)
+}
+
+func (walker *discoveryWalker) infoOnRootFilesystem(displayPath string, info os.FileInfo) bool {
+	if !walker.options.OneFileSystem {
+		return true
+	}
+	filesystem, ok := walker.options.filesystemID(info)
+	if !ok {
+		walker.reportError(displayPath, errors.New("filesystem identity is unavailable"))
+		return false
+	}
+	return filesystem == walker.rootFilesystem
+}
+
+func (walker *discoveryWalker) markVisited(physicalPath string) bool {
+	if _, exists := walker.visited[physicalPath]; exists {
+		return false
+	}
+	walker.visited[physicalPath] = struct{}{}
+	return true
+}
+
+func (walker *discoveryWalker) reportError(displayPath string, err error) bool {
+	return sendOutcome(walker.ctx, walker.outcomes, outcome{err: &FileError{Path: displayPath, Err: err}})
+}
+
+func queuePath(
+	ctx context.Context,
+	filePath string,
+	jobs chan<- string,
+	counters *progressCounters,
+	callback func(Progress),
+) bool {
+	discovered := counters.filesDiscovered.Add(1)
+	if discovered == 1 || discovered%100 == 0 {
+		notifyProgress(callback, counters)
+	}
+	if sendPath(ctx, jobs, filePath) {
+		return true
+	}
+	counters.filesDiscovered.Add(-1)
+	return false
+}
+
+func normalizeExcludePatterns(patterns []string) ([]string, error) {
+	result := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		pattern = strings.TrimPrefix(pattern, "./")
+		pattern = strings.TrimSuffix(pattern, "/")
+		if pattern == "" || path.IsAbs(pattern) || filepath.IsAbs(pattern) {
+			return nil, fmt.Errorf("invalid exclude pattern %q: use a relative glob", pattern)
+		}
+		if _, err := path.Match(pattern, ""); err != nil {
+			return nil, fmt.Errorf("invalid exclude pattern %q: %w", pattern, err)
+		}
+		if !slices.Contains(result, pattern) {
+			result = append(result, pattern)
+		}
+	}
+	return result, nil
+}
+
+func isExcluded(relative string, patterns []string) bool {
+	relative = filepath.ToSlash(relative)
+	for _, pattern := range patterns {
+		candidate := relative
+		if !strings.Contains(pattern, "/") {
+			candidate = path.Base(relative)
+		}
+		matched, _ := path.Match(pattern, candidate)
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeExtensions(extensions []string) ([]string, error) {
+	result := make([]string, 0, len(extensions))
+	for _, extension := range extensions {
+		extension = strings.ToLower(strings.TrimSpace(extension))
+		if extension == "" {
+			return nil, errors.New("extension cannot be empty")
+		}
+		if strings.ContainsAny(extension, `/*?[]\\`) {
+			return nil, fmt.Errorf("invalid extension %q", extension)
+		}
+		if !strings.HasPrefix(extension, ".") {
+			extension = "." + extension
+		}
+		if extension == "." {
+			return nil, errors.New("extension cannot be empty")
+		}
+		result = append(result, extension)
+	}
+	slices.Sort(result)
+	return slices.Compact(result), nil
+}
+
+func matchesExtension(filePath string, extensions []string) bool {
+	return len(extensions) == 0 || slices.Contains(extensions, strings.ToLower(filepath.Ext(filePath)))
 }
 
 func notifyProgress(callback func(Progress), counters *progressCounters) {
