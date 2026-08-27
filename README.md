@@ -58,6 +58,8 @@ certfinder -exclude=.git -exclude='build/*' .
 certfinder -extensions=.pem,.crt -extensions=cer /etc
 certfinder -one-file-system -ignore-errors /
 certfinder -follow-symlinks /etc/services
+certfinder -archives ./backups
+certfinder -archives -archive-max-depth=2 -archive-max-bytes=134217728 ./backups
 ```
 
 Use `--version` to print the version, commit, and build timestamp.
@@ -74,6 +76,58 @@ certificate without inspecting the complete file. With a positive limit, `certfi
 whose first PEM certificate is located after that limit. A DER certificate is recognized only when the complete
 file fits within the limit because DER has no reliable text marker and parsing arbitrary binary offsets would
 produce expensive false candidates.
+
+## Archive scanning
+
+Archive scanning is disabled by default. Pass `-archives` to inspect ZIP, TAR, and gzip content using only Go's
+standard library. Formats are detected from their content rather than filename extensions. ZIP, gzip, and ustar TAR
+signatures are supported, including archives stored under misleading or extensionless names.
+
+Every archive entry uses the ordinary certificate scanner, so entries may contain PEM bundles, DER certificates,
+JKS/JCEKS stores, plaintext PKCS#12 certificate bags, or another supported archive. Nested locations are retained in
+outer-to-inner order. For example, a certificate in a TAR inside a ZIP is printed as:
+
+```text
+/srv/backup.zip:nested/config.tar:etc/service/cert.pem [index 0]
+```
+
+JSON and JSON Lines keep the filesystem path and archive chain separate:
+
+```json
+{
+  "path": "/srv/backup.zip",
+  "archive_entries": ["nested/config.tar", "etc/service/cert.pem"],
+  "index": 0
+}
+```
+
+The same `archive_entries` field is included in encrypted PKCS#12 findings and grouped duplicate locations. A gzip
+stream contributes one logical entry. Its name comes from the gzip header when present; otherwise `certfinder`
+removes the outer `.gz` suffix or uses `content` as a fallback.
+
+Archive scanning always enforces three positive safety limits per outer filesystem archive:
+
+- `-archive-max-bytes=67108864` limits bytes decompressed and inspected across the archive and all nested layers.
+- `-archive-max-entries=10000` limits all entries encountered across the archive and nested archives.
+- `-archive-max-depth=3` counts the outer archive as depth one.
+
+Archive-limit options require `-archives`. The byte budget is shared by nested content, and bytes extracted again by
+a deeper archive layer count again. This prevents highly compressed and recursively nested content from bypassing
+the limit. Nested archives are buffered only within this bounded budget when their reader needs random access.
+
+`-max-bytes` remains a separate per-entry sniff limit. An entry with no recognized content is stopped at that limit
+and counted as a capped archive entry. A valid PEM certificate, recognized keystore, or nested archive in the prefix
+causes the complete entry to be read so bundles are not truncated, but the archive-wide decompressed-byte limit still
+applies. `-max-bytes=0` reads each entry fully only until the mandatory archive-wide budget is exhausted.
+
+Malformed archive structures, checksum failures encountered while reading selected content, limit violations, and
+encrypted ZIP entries produce controlled path warnings. Certificates parsed safely before a later warning remain in
+the result. No archive passwords or decryption are supported. As with other non-fatal path errors, use
+`-ignore-errors` when warnings should remain visible without making the command fail.
+
+`-exclude` and `-extensions` remain filesystem traversal filters: they decide which outer files are opened and do not
+filter logical entries inside an enabled archive. Include the outer archive extension when using `-extensions`, or
+leave extension filtering disabled to retain content-based archive detection.
 
 ## Java keystores
 
@@ -360,14 +414,14 @@ an abridged duplicate record looks like this:
 
 ## Progress
 
-At startup, `certfinder` writes its name, version, resolved scan path, worker count, and all effective scan and
-traversal and verification options to stderr. A status line shows the number of files discovered and scanned,
-pending files,
-certificates found, encrypted PKCS#12 contents, and whether directory discovery is complete. The periodic status
-refresh is limited to once every five seconds. The final summary also reports how many files were stopped at the
-`-max-bytes` sniffing limit without triggering a full reread. Certificate identity counts are calculated after
-selection filters: `matched` is the number of matching occurrences, `unique` is the number of distinct SHA-256
-fingerprints, and each occurrence after the first copy of a fingerprint is a `duplicate occurrence`.
+At startup, `certfinder` writes its name, version, resolved scan path, worker count, and all effective scan,
+traversal, verification, and archive options to stderr. A status line shows filesystem files discovered and scanned,
+pending files, archive entries discovered and scanned, certificates found, encrypted PKCS#12 contents, and whether
+directory discovery is complete. The periodic status refresh is limited to once every five seconds. The final
+summary separately reports filesystem files and archive entries stopped at the per-content `-max-bytes` sniffing
+limit. Certificate identity counts are calculated after selection filters: `matched` is the number of matching
+occurrences, `unique` is the number of distinct SHA-256 fingerprints, and each occurrence after the first copy of a
+fingerprint is a `duplicate occurrence`.
 
 While directory discovery is running, the discovered-file total can increase. This keeps scanning single-pass and
 avoids delaying the scan with a separate counting traversal. When a certificate is found in text mode, its details

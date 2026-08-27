@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -64,6 +65,22 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.Var(&extensions, "extensions", "scan only these file extensions; comma-separated or repeatable")
 	oneFileSystem := flags.Bool("one-file-system", false, "do not scan files or directories on other filesystems (Linux and macOS)")
 	followSymlinks := flags.Bool("follow-symlinks", false, "follow symlinks encountered below PATH while preventing cycles")
+	archives := flags.Bool("archives", false, "scan certificates inside ZIP, TAR, and gzip archives")
+	archiveMaxBytes := flags.Int64(
+		"archive-max-bytes",
+		scanner.DefaultArchiveMaxBytes,
+		"maximum decompressed bytes inspected per outer archive",
+	)
+	archiveMaxEntries := flags.Int(
+		"archive-max-entries",
+		scanner.DefaultArchiveMaxEntries,
+		"maximum entries inspected per outer archive, including nested archives",
+	)
+	archiveMaxDepth := flags.Int(
+		"archive-max-depth",
+		scanner.DefaultArchiveMaxDepth,
+		"maximum archive nesting depth, counting the outer archive as one",
+	)
 	ignoreErrors := flags.Bool("ignore-errors", false, "exclude non-fatal file scan errors from the exit status")
 	usageValue := flags.String("usage", "", "filter by extended key usage, such as server or client")
 	var hostname hostnameFlag
@@ -108,12 +125,33 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		flags.Usage()
 		return exitUsageError
 	}
+	providedFlags := make(map[string]bool)
+	flags.Visit(func(visited *flag.Flag) {
+		providedFlags[visited.Name] = true
+	})
 	if *maxBytes < 0 {
 		logger.Error("invalid option", "option", "max-bytes", "error", "value cannot be negative")
 		return exitUsageError
 	}
 	if *workers < 1 {
 		logger.Error("invalid option", "option", "workers", "error", "value must be at least 1")
+		return exitUsageError
+	}
+	if *archiveMaxBytes < 1 {
+		logger.Error("invalid option", "option", "archive-max-bytes", "error", "value must be positive")
+		return exitUsageError
+	}
+	if *archiveMaxEntries < 1 {
+		logger.Error("invalid option", "option", "archive-max-entries", "error", "value must be positive")
+		return exitUsageError
+	}
+	if *archiveMaxDepth < 1 {
+		logger.Error("invalid option", "option", "archive-max-depth", "error", "value must be positive")
+		return exitUsageError
+	}
+	if !*archives && (providedFlags["archive-max-bytes"] || providedFlags["archive-max-entries"] ||
+		providedFlags["archive-max-depth"]) {
+		logger.Error("invalid option", "error", "archive limit options require -archives")
 		return exitUsageError
 	}
 	usage, err := normalizeUsage(*usageValue)
@@ -196,24 +234,28 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	now := time.Now()
 	display := newProgressDisplay(stderr, stdout, outputFormat == outputText, *quiet)
 	display.Start(scanConfiguration{
-		Path:           flags.Arg(0),
-		Workers:        *workers,
-		MaxBytes:       *maxBytes,
-		Exclude:        append([]string{}, excludes...),
-		Extensions:     append([]string{}, extensions...),
-		OneFileSystem:  *oneFileSystem,
-		FollowSymlinks: *followSymlinks,
-		IgnoreErrors:   *ignoreErrors,
-		Usage:          usage,
-		Hostname:       hostnameFilter,
-		Expiration:     expirationDescription,
-		FailExpiring:   failExpirationDescription,
-		Verify:         *verify,
-		Roots:          append([]string{}, roots...),
-		RootsOnly:      *rootsOnly,
-		IdentityMode:   identityMode,
-		Output:         outputFormat,
-		Quiet:          *quiet,
+		Path:              flags.Arg(0),
+		Workers:           *workers,
+		MaxBytes:          *maxBytes,
+		Exclude:           append([]string{}, excludes...),
+		Extensions:        append([]string{}, extensions...),
+		OneFileSystem:     *oneFileSystem,
+		FollowSymlinks:    *followSymlinks,
+		Archives:          *archives,
+		ArchiveMaxBytes:   *archiveMaxBytes,
+		ArchiveMaxEntries: *archiveMaxEntries,
+		ArchiveMaxDepth:   *archiveMaxDepth,
+		IgnoreErrors:      *ignoreErrors,
+		Usage:             usage,
+		Hostname:          hostnameFilter,
+		Expiration:        expirationDescription,
+		FailExpiring:      failExpirationDescription,
+		Verify:            *verify,
+		Roots:             append([]string{}, roots...),
+		RootsOnly:         *rootsOnly,
+		IdentityMode:      identityMode,
+		Output:            outputFormat,
+		Quiet:             *quiet,
 	})
 	var verificationRoots []scanner.Certificate
 	if *verify && len(roots) > 0 {
@@ -245,6 +287,10 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		Extensions:             append([]string{}, extensions...),
 		OneFileSystem:          *oneFileSystem,
 		FollowSymlinks:         *followSymlinks,
+		ScanArchives:           *archives,
+		ArchiveMaxBytes:        *archiveMaxBytes,
+		ArchiveMaxEntries:      *archiveMaxEntries,
+		ArchiveMaxDepth:        *archiveMaxDepth,
 		DiscardCertificates:    !*jsonOutput && !groupedOutput && !*verify,
 		DiscardPKCS12Encrypted: !*jsonOutput,
 		OnProgress:             onProgress,
@@ -549,7 +595,12 @@ func printCertificate(output io.Writer, certificate scanner.Certificate) error {
 }
 
 func printCertificateAt(output io.Writer, certificate scanner.Certificate, now time.Time) error {
-	if _, err := fmt.Fprintf(output, "%s [index %d]\n", certificate.Path, certificate.Index); err != nil {
+	if _, err := fmt.Fprintf(
+		output,
+		"%s [index %d]\n",
+		formatLogicalLocation(certificate.Path, certificate.ArchiveEntries),
+		certificate.Index,
+	); err != nil {
 		return err
 	}
 	return printCertificateDetailsAt(output, certificate, now)
@@ -778,6 +829,7 @@ func contains(values []string, wanted string) bool {
 
 type jsonCertificate struct {
 	Path                         string            `json:"path,omitempty"`
+	ArchiveEntries               []string          `json:"archive_entries,omitempty"`
 	Index                        *int              `json:"index,omitempty"`
 	Subject                      string            `json:"subject"`
 	Issuer                       string            `json:"issuer"`
@@ -821,9 +873,10 @@ type jsonKeystoreInfo struct {
 }
 
 type jsonPKCS12EncryptedContent struct {
-	RecordType string                    `json:"record_type"`
-	Path       string                    `json:"path"`
-	PKCS12     jsonPKCS12EncryptedDetail `json:"pkcs12"`
+	RecordType     string                    `json:"record_type"`
+	Path           string                    `json:"path"`
+	ArchiveEntries []string                  `json:"archive_entries,omitempty"`
+	PKCS12         jsonPKCS12EncryptedDetail `json:"pkcs12"`
 }
 
 type jsonPKCS12EncryptedDetail struct {
@@ -872,6 +925,7 @@ func newJSONCertificate(certificate scanner.Certificate, now time.Time) jsonCert
 	index := certificate.Index
 	return jsonCertificate{
 		Path:                         certificate.Path,
+		ArchiveEntries:               slices.Clone(certificate.ArchiveEntries),
 		Index:                        &index,
 		Subject:                      certificate.Subject,
 		Issuer:                       certificate.Issuer,
@@ -941,8 +995,9 @@ func newJSONKeystoreInfo(keystore *scanner.KeystoreInfo) *jsonKeystoreInfo {
 
 func newJSONPKCS12EncryptedContent(finding scanner.PKCS12EncryptedContent) jsonPKCS12EncryptedContent {
 	return jsonPKCS12EncryptedContent{
-		RecordType: "pkcs12_encrypted_content",
-		Path:       finding.Path,
+		RecordType:     "pkcs12_encrypted_content",
+		Path:           finding.Path,
+		ArchiveEntries: slices.Clone(finding.ArchiveEntries),
 		PKCS12: jsonPKCS12EncryptedDetail{
 			Status:       "encrypted",
 			ContentIndex: finding.ContentIndex,
@@ -954,7 +1009,12 @@ func newJSONPKCS12EncryptedContent(finding scanner.PKCS12EncryptedContent) jsonP
 }
 
 func printPKCS12EncryptedContent(output io.Writer, finding scanner.PKCS12EncryptedContent) error {
-	if _, err := fmt.Fprintf(output, "%s [PKCS#12 content %d]\n", finding.Path, finding.ContentIndex); err != nil {
+	if _, err := fmt.Fprintf(
+		output,
+		"%s [PKCS#12 content %d]\n",
+		formatLogicalLocation(finding.Path, finding.ArchiveEntries),
+		finding.ContentIndex,
+	); err != nil {
 		return err
 	}
 	bagCount := "unknown"
@@ -971,4 +1031,11 @@ func printPKCS12EncryptedContent(output io.Writer, finding scanner.PKCS12Encrypt
 		}
 	}
 	return nil
+}
+
+func formatLogicalLocation(filePath string, archiveEntries []string) string {
+	if len(archiveEntries) == 0 {
+		return filePath
+	}
+	return filePath + ":" + strings.Join(archiveEntries, ":")
 }

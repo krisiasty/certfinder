@@ -17,6 +17,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -275,7 +276,7 @@ func TestRunDuplicateModesGroupFilesAndBundleEntries(t *testing.T) {
 		t.Fatalf("locations = %+v, want %+v", duplicateGroups[0].Locations, wantLocations)
 	}
 	for index, location := range duplicateGroups[0].Locations {
-		if location != wantLocations[index] {
+		if !reflect.DeepEqual(location, wantLocations[index]) {
 			t.Errorf("location %d = %+v, want %+v", index, location, wantLocations[index])
 		}
 	}
@@ -321,8 +322,10 @@ func TestRunDuplicateModesGroupFilesAndBundleEntries(t *testing.T) {
 			t.Errorf("certificate %d has no JSON index", index)
 			continue
 		}
-		location := certificateLocation{Path: certificate.Path, Index: *certificate.Index}
-		if location != wantLocations[index] {
+		location := certificateLocation{
+			Path: certificate.Path, ArchiveEntries: certificate.ArchiveEntries, Index: *certificate.Index,
+		}
+		if !reflect.DeepEqual(location, wantLocations[index]) {
 			t.Errorf("certificate location %d = %+v, want %+v", index, location, wantLocations[index])
 		}
 	}
