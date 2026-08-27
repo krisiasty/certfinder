@@ -81,7 +81,7 @@ monitoring flags control the exit status without hiding certificates from the ou
 | `-expired` | Print only already expired certificates. | None. |
 | `-expiration=30d` | Print certificates that are already expired or expire within 30 days. | None. |
 | `-fail-expired` | Do not filter the output. | Return status `3` if a selected certificate is expired. |
-| `-fail-expiring=30d` | Do not filter the output. | Return status `3` if a selected certificate is expired or expires within 30 days. |
+| `-fail-expiring=30d` | Do not filter output. | Status `3` for expiry within 30 days, including expired certificates. |
 
 For example, the first command prints only expired certificates. The second prints every certificate selected by
 the other filters, but returns status `3` if any of them is expired:
