@@ -71,16 +71,31 @@ Use `-usage` to select certificates that support a particular extended key usage
 usage names shown in normal or JSON output are also accepted. Certificates without an extended key usage extension
 are unrestricted and match every usage filter.
 
-Use `-expiration=30d` to print certificates that are already expired or will expire within 30 days. Standard Go
-duration units, such as `48h` or `90m`, are also accepted. `-expired` is a shortcut for `-expiration=0d`. The two
-flags cannot be combined.
+## Expiration filtering versus monitoring
+
+The expiration flags form two separate pairs. The filter flags control which certificates are printed, while the
+monitoring flags control the exit status without hiding certificates from the output.
+
+| Flag | Effect on output | Effect on exit status |
+| --- | --- | --- |
+| `-expired` | Print only already expired certificates. | None. |
+| `-expiration=30d` | Print certificates that are already expired or expire within 30 days. | None. |
+| `-fail-expired` | Do not filter the output. | Return status `3` if a selected certificate is expired. |
+| `-fail-expiring=30d` | Do not filter the output. | Return status `3` if a selected certificate is expired or expires within 30 days. |
+
+For example, the first command prints only expired certificates. The second prints every certificate selected by
+the other filters, but returns status `3` if any of them is expired:
+
+```console
+certfinder -expired /etc/certificates
+certfinder -fail-expired /etc/certificates
+```
+
+`-expired` is a shortcut for `-expiration=0d`, and `-fail-expired` is a shortcut for `-fail-expiring=0d`. A shortcut
+cannot be combined with its duration-based counterpart. Durations use standard Go units, such as `48h` or `90m`,
+with `d` additionally accepted for days.
 
 ## Monitoring and exit statuses
-
-Use `-fail-expiring=30d` to return an operational-finding status when a matching certificate is already expired or
-will expire within 30 days. Standard Go duration units are also accepted. `-fail-expired` is a shortcut for
-`-fail-expiring=0d`, and the two flags cannot be combined. These flags change only the exit status; they do not filter
-output.
 
 Monitoring applies after the existing selection filters. For example, `-usage=server -fail-expired` ignores expired
 certificates that are restricted to client authentication. Adding `-expiration=7d` further limits both output and
