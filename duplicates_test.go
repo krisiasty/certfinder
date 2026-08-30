@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestGroupCertificatesSortsGroupsAndLocations(t *testing.T) {
 		t.Fatalf("duplicate locations = %+v, want %+v", groups[1].Locations, wantLocations)
 	}
 	for index, location := range groups[1].Locations {
-		if location != wantLocations[index] {
+		if !reflect.DeepEqual(location, wantLocations[index]) {
 			t.Errorf("duplicate location %d = %+v, want %+v", index, location, wantLocations[index])
 		}
 	}
@@ -45,6 +46,29 @@ func TestDuplicateCertificateGroups(t *testing.T) {
 	duplicates := duplicateCertificateGroups(groups)
 	if len(duplicates) != 1 || len(duplicates[0].Locations) != 2 {
 		t.Fatalf("duplicate groups = %+v, want only the two-location group", duplicates)
+	}
+}
+
+func TestGroupCertificatesPreservesArchiveLocations(t *testing.T) {
+	t.Parallel()
+	groups := groupCertificates([]scanner.Certificate{
+		{
+			Path:              "/backups/certificates.zip",
+			ArchiveEntries:    []string{"nested/config.tar", "etc/service/cert.pem"},
+			Index:             2,
+			SHA256Fingerprint: "archived",
+		},
+	})
+	if len(groups) != 1 || len(groups[0].Locations) != 1 {
+		t.Fatalf("groups = %+v", groups)
+	}
+	want := certificateLocation{
+		Path:           "/backups/certificates.zip",
+		ArchiveEntries: []string{"nested/config.tar", "etc/service/cert.pem"},
+		Index:          2,
+	}
+	if !reflect.DeepEqual(groups[0].Locations[0], want) {
+		t.Fatalf("archive location = %+v, want %+v", groups[0].Locations[0], want)
 	}
 }
 

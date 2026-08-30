@@ -33,7 +33,16 @@ const (
 	// valid PEM or recognized keystore match is subsequently read completely.
 	// A value of zero in Options disables the initial limit.
 	DefaultMaxBytes int64 = 64 << 10
-	maxWorkers            = 8
+	// DefaultArchiveMaxBytes bounds bytes decompressed while inspecting one
+	// outer filesystem archive, including nested archive layers.
+	DefaultArchiveMaxBytes int64 = 64 << 20
+	// DefaultArchiveMaxEntries bounds entries across one outer filesystem
+	// archive and all archives nested inside it.
+	DefaultArchiveMaxEntries = 10_000
+	// DefaultArchiveMaxDepth bounds archive layers, counting the outer archive
+	// as depth one.
+	DefaultArchiveMaxDepth = 3
+	maxWorkers             = 8
 )
 
 // Certificate validity states.
@@ -65,12 +74,16 @@ var pemBegin = []byte("-----BEGIN CERTIFICATE-----")
 
 // Options controls a filesystem scan.
 type Options struct {
-	MaxBytes       int64
-	Workers        int
-	Exclude        []string
-	Extensions     []string
-	OneFileSystem  bool
-	FollowSymlinks bool
+	MaxBytes          int64
+	Workers           int
+	Exclude           []string
+	Extensions        []string
+	OneFileSystem     bool
+	FollowSymlinks    bool
+	ScanArchives      bool
+	ArchiveMaxBytes   int64
+	ArchiveMaxEntries int
+	ArchiveMaxDepth   int
 	// DiscardCertificates prevents certificates from being retained in Report.
 	// OnCertificate callbacks and progress counters are unaffected.
 	DiscardCertificates bool
@@ -86,13 +99,16 @@ type Options struct {
 // Progress is a point-in-time snapshot of a running scan. Callbacks may be
 // invoked concurrently and should return quickly.
 type Progress struct {
-	FilesDiscovered   int64
-	FilesScanned      int64
-	FilesCapped       int64
-	CertificatesFound int64
-	PKCS12Encrypted   int64
-	ScanErrors        int64
-	DiscoveryComplete bool
+	FilesDiscovered          int64
+	FilesScanned             int64
+	FilesCapped              int64
+	ArchiveEntriesDiscovered int64
+	ArchiveEntriesScanned    int64
+	ArchiveEntriesCapped     int64
+	CertificatesFound        int64
+	PKCS12Encrypted          int64
+	ScanErrors               int64
+	DiscoveryComplete        bool
 }
 
 // Certificate describes one certificate found in a file.
@@ -119,6 +135,7 @@ type Certificate struct {
 	NotAfter                     time.Time
 	Keystore                     *KeystoreInfo
 	Verification                 *VerificationResult
+	ArchiveEntries               []string
 	dnsNames                     []string
 	ipAddresses                  []net.IP
 	parsed                       *x509.Certificate
@@ -137,11 +154,12 @@ type KeystoreInfo struct {
 // PKCS12EncryptedContent describes a PKCS#12 encryptedData section whose bags
 // cannot be inspected without decrypting it.
 type PKCS12EncryptedContent struct {
-	Path         string
-	ContentIndex int
-	Algorithm    string
-	AlgorithmOID string
-	BagCount     *int
+	Path           string
+	ArchiveEntries []string
+	ContentIndex   int
+	Algorithm      string
+	AlgorithmOID   string
+	BagCount       *int
 }
 
 // ValidityStatus returns the certificate validity state at the supplied time.
@@ -197,13 +215,16 @@ type outcome struct {
 }
 
 type progressCounters struct {
-	filesDiscovered   atomic.Int64
-	filesScanned      atomic.Int64
-	filesCapped       atomic.Int64
-	certificatesFound atomic.Int64
-	pkcs12Encrypted   atomic.Int64
-	scanErrors        atomic.Int64
-	discoveryComplete atomic.Bool
+	filesDiscovered          atomic.Int64
+	filesScanned             atomic.Int64
+	filesCapped              atomic.Int64
+	archiveEntriesDiscovered atomic.Int64
+	archiveEntriesScanned    atomic.Int64
+	archiveEntriesCapped     atomic.Int64
+	certificatesFound        atomic.Int64
+	pkcs12Encrypted          atomic.Int64
+	scanErrors               atomic.Int64
+	discoveryComplete        atomic.Bool
 }
 
 // Scan recursively scans root. It always follows root itself when root is a
@@ -220,6 +241,26 @@ func Scan(ctx context.Context, root string, options Options) (Report, error) {
 	}
 	if options.Workers == 0 {
 		options.Workers = min(runtime.GOMAXPROCS(0), maxWorkers)
+	}
+	if options.ScanArchives {
+		if options.ArchiveMaxBytes == 0 {
+			options.ArchiveMaxBytes = DefaultArchiveMaxBytes
+		}
+		if options.ArchiveMaxEntries == 0 {
+			options.ArchiveMaxEntries = DefaultArchiveMaxEntries
+		}
+		if options.ArchiveMaxDepth == 0 {
+			options.ArchiveMaxDepth = DefaultArchiveMaxDepth
+		}
+		if options.ArchiveMaxBytes < 1 {
+			return Report{}, errors.New("archive max bytes must be positive")
+		}
+		if options.ArchiveMaxEntries < 1 {
+			return Report{}, errors.New("archive max entries must be positive")
+		}
+		if options.ArchiveMaxDepth < 1 {
+			return Report{}, errors.New("archive max depth must be positive")
+		}
 	}
 	var err error
 	options.Exclude, err = normalizeExcludePatterns(options.Exclude)
@@ -266,7 +307,7 @@ func Scan(ctx context.Context, root string, options Options) (Report, error) {
 		workerGroup.Add(1)
 		go func() {
 			defer workerGroup.Done()
-			worker(ctx, jobs, outcomes, options.MaxBytes)
+			worker(ctx, jobs, outcomes, options, &counters)
 		}()
 	}
 
@@ -626,19 +667,28 @@ func notifyProgress(callback func(Progress), counters *progressCounters) {
 		return
 	}
 	callback(Progress{
-		FilesDiscovered:   counters.filesDiscovered.Load(),
-		FilesScanned:      counters.filesScanned.Load(),
-		FilesCapped:       counters.filesCapped.Load(),
-		CertificatesFound: counters.certificatesFound.Load(),
-		PKCS12Encrypted:   counters.pkcs12Encrypted.Load(),
-		ScanErrors:        counters.scanErrors.Load(),
-		DiscoveryComplete: counters.discoveryComplete.Load(),
+		FilesDiscovered:          counters.filesDiscovered.Load(),
+		FilesScanned:             counters.filesScanned.Load(),
+		FilesCapped:              counters.filesCapped.Load(),
+		ArchiveEntriesDiscovered: counters.archiveEntriesDiscovered.Load(),
+		ArchiveEntriesScanned:    counters.archiveEntriesScanned.Load(),
+		ArchiveEntriesCapped:     counters.archiveEntriesCapped.Load(),
+		CertificatesFound:        counters.certificatesFound.Load(),
+		PKCS12Encrypted:          counters.pkcs12Encrypted.Load(),
+		ScanErrors:               counters.scanErrors.Load(),
+		DiscoveryComplete:        counters.discoveryComplete.Load(),
 	})
 }
 
 func sortReport(report *Report) {
 	sort.Slice(report.Certificates, func(i, j int) bool {
 		if report.Certificates[i].Path == report.Certificates[j].Path {
+			if compared := slices.Compare(
+				report.Certificates[i].ArchiveEntries,
+				report.Certificates[j].ArchiveEntries,
+			); compared != 0 {
+				return compared < 0
+			}
 			return report.Certificates[i].Index < report.Certificates[j].Index
 		}
 		return report.Certificates[i].Path < report.Certificates[j].Path
@@ -648,20 +698,37 @@ func sortReport(report *Report) {
 	})
 	sort.Slice(report.PKCS12Encrypted, func(i, j int) bool {
 		if report.PKCS12Encrypted[i].Path == report.PKCS12Encrypted[j].Path {
+			if compared := slices.Compare(
+				report.PKCS12Encrypted[i].ArchiveEntries,
+				report.PKCS12Encrypted[j].ArchiveEntries,
+			); compared != 0 {
+				return compared < 0
+			}
 			return report.PKCS12Encrypted[i].ContentIndex < report.PKCS12Encrypted[j].ContentIndex
 		}
 		return report.PKCS12Encrypted[i].Path < report.PKCS12Encrypted[j].Path
 	})
 }
 
-func worker(ctx context.Context, jobs <-chan string, outcomes chan<- outcome, maxBytes int64) {
+func worker(
+	ctx context.Context,
+	jobs <-chan string,
+	outcomes chan<- outcome,
+	options Options,
+	counters *progressCounters,
+) {
 	for {
 		select {
 		case path, ok := <-jobs:
 			if !ok {
 				return
 			}
-			result := scanFileContents(path, maxBytes)
+			result := scanFileContentsWithOptions(path, options, func(discovered, scanned, capped int64) {
+				counters.archiveEntriesDiscovered.Add(discovered)
+				counters.archiveEntriesScanned.Add(scanned)
+				counters.archiveEntriesCapped.Add(capped)
+				notifyProgress(options.OnProgress, counters)
+			})
 			result.scanned = true
 			if result.err != nil {
 				result.err.Path = path
@@ -702,6 +769,14 @@ func scanFile(path string, maxBytes int64) ([]Certificate, bool, error) {
 }
 
 func scanFileContents(path string, maxBytes int64) outcome {
+	return scanFileContentsWithOptions(path, Options{MaxBytes: maxBytes}, nil)
+}
+
+func scanFileContentsWithOptions(
+	path string,
+	options Options,
+	archiveProgress func(discovered, scanned, capped int64),
+) outcome {
 	file, err := os.Open(path) //nolint:gosec // Scan paths are explicitly supplied by the user.
 	if err != nil {
 		return scanOutcome(nil, nil, false, err)
@@ -709,8 +784,8 @@ func scanFileContents(path string, maxBytes int64) outcome {
 	defer func() { _ = file.Close() }()
 
 	reader := io.Reader(file)
-	if maxBytes > 0 {
-		reader = io.LimitReader(file, maxBytes)
+	if options.MaxBytes > 0 {
+		reader = io.LimitReader(file, options.MaxBytes)
 	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
@@ -718,7 +793,7 @@ func scanFileContents(path string, maxBytes int64) outcome {
 	}
 
 	complete := true
-	if maxBytes > 0 && int64(len(data)) == maxBytes {
+	if options.MaxBytes > 0 && int64(len(data)) == options.MaxBytes {
 		var extra [1]byte
 		if _, err := file.Read(extra[:]); err == nil {
 			complete = false
@@ -726,15 +801,33 @@ func scanFileContents(path string, maxBytes int64) outcome {
 			return scanOutcome(nil, nil, false, err)
 		}
 	}
-	if _, isJavaKeystore := detectJavaKeystore(data); isJavaKeystore {
-		if !complete {
+	if options.ScanArchives {
+		if format := detectArchiveFormat(data); format != archiveFormatNone {
 			if _, err := file.Seek(0, io.SeekStart); err != nil {
 				return scanOutcome(nil, nil, false, err)
 			}
-			data, err = io.ReadAll(file)
-			if err != nil {
-				return scanOutcome(nil, nil, false, err)
-			}
+			return scanArchiveFile(path, file, format, options, archiveProgress)
+		}
+	}
+	result, needsFullRead := scanContentData(path, data, complete)
+	if needsFullRead {
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return scanOutcome(nil, nil, false, err)
+		}
+		data, err = io.ReadAll(file)
+		if err != nil {
+			return scanOutcome(nil, nil, false, err)
+		}
+		result, _ = scanContentData(path, data, true)
+	}
+	result.capped = !complete && !needsFullRead
+	return result
+}
+
+func scanContentData(path string, data []byte, complete bool) (outcome, bool) {
+	if _, detected := detectJavaKeystore(data); detected {
+		if !complete {
+			return outcome{}, true
 		}
 		parsed, parseErr := parseJavaKeystore(data)
 		result := make([]Certificate, 0, len(parsed))
@@ -747,17 +840,11 @@ func scanFileContents(path string, maxBytes int64) outcome {
 			description.Keystore = &keystore
 			result = append(result, description)
 		}
-		return scanOutcome(result, nil, false, parseErr)
+		return scanOutcome(result, nil, false, parseErr), false
 	}
 	if detectPKCS12(data) {
 		if !complete {
-			if _, err := file.Seek(0, io.SeekStart); err != nil {
-				return scanOutcome(nil, nil, false, err)
-			}
-			data, err = io.ReadAll(file)
-			if err != nil {
-				return scanOutcome(nil, nil, false, err)
-			}
+			return outcome{}, true
 		}
 		parsed, encryptedContents, parseErr := parsePKCS12(data)
 		result := make([]Certificate, 0, len(parsed))
@@ -773,20 +860,16 @@ func scanFileContents(path string, maxBytes int64) outcome {
 		for index := range encryptedContents {
 			encryptedContents[index].Path = path
 		}
-		return scanOutcome(result, encryptedContents, false, parseErr)
+		return scanOutcome(result, encryptedContents, false, parseErr), false
 	}
 
 	parsed := parsePEM(data)
 	if len(parsed) > 0 && !complete {
-		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			return scanOutcome(nil, nil, false, err)
+		result := make([]Certificate, 0, len(parsed))
+		for index, certificate := range parsed {
+			result = append(result, describe(path, index, certificate))
 		}
-		data, err = io.ReadAll(file)
-		if err != nil {
-			return scanOutcome(nil, nil, false, err)
-		}
-		parsed = parsePEM(data)
-		complete = true
+		return scanOutcome(result, nil, false, nil), true
 	}
 	if len(parsed) == 0 && complete {
 		if certificates, derErr := x509.ParseCertificates(data); derErr == nil {
@@ -798,7 +881,7 @@ func scanFileContents(path string, maxBytes int64) outcome {
 	for index, certificate := range parsed {
 		result = append(result, describe(path, index, certificate))
 	}
-	return scanOutcome(result, nil, !complete, nil)
+	return scanOutcome(result, nil, !complete, nil), false
 }
 
 func scanOutcome(

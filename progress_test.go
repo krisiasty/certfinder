@@ -15,28 +15,34 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 	var certificateOutput bytes.Buffer
 	display := newProgressDisplay(&progressOutput, &certificateOutput, true, false)
 	display.Start(scanConfiguration{
-		Path:           ".",
-		Workers:        4,
-		MaxBytes:       scanner.DefaultMaxBytes,
-		Exclude:        []string{".git", "cache"},
-		Extensions:     []string{".pem", ".crt"},
-		OneFileSystem:  true,
-		FollowSymlinks: true,
-		IgnoreErrors:   true,
-		Usage:          scanner.UsageServer,
-		Hostname:       "service.example.test",
-		Expiration:     "30d",
-		FailExpiring:   "14d",
-		Verify:         true,
-		Roots:          []string{"/etc/private-root.pem"},
-		RootsOnly:      true,
-		IdentityMode:   identityModeDuplicates,
-		Output:         outputText,
+		Path:              ".",
+		Workers:           4,
+		MaxBytes:          scanner.DefaultMaxBytes,
+		Exclude:           []string{".git", "cache"},
+		Extensions:        []string{".pem", ".crt"},
+		OneFileSystem:     true,
+		FollowSymlinks:    true,
+		IgnoreErrors:      true,
+		Usage:             scanner.UsageServer,
+		Hostname:          "service.example.test",
+		Expiration:        "30d",
+		FailExpiring:      "14d",
+		Verify:            true,
+		Roots:             []string{"/etc/private-root.pem"},
+		RootsOnly:         true,
+		Archives:          true,
+		ArchiveMaxBytes:   scanner.DefaultArchiveMaxBytes,
+		ArchiveMaxEntries: scanner.DefaultArchiveMaxEntries,
+		ArchiveMaxDepth:   scanner.DefaultArchiveMaxDepth,
+		IdentityMode:      identityModeDuplicates,
+		Output:            outputText,
 	})
 	display.Update(scanner.Progress{
-		FilesDiscovered:   10,
-		FilesScanned:      4,
-		CertificatesFound: 1,
+		FilesDiscovered:          10,
+		FilesScanned:             4,
+		ArchiveEntriesDiscovered: 3,
+		ArchiveEntriesScanned:    2,
+		CertificatesFound:        1,
 	})
 	display.Certificate(scanner.Certificate{
 		Path:      "/certificates/server.pem",
@@ -46,11 +52,14 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 		NotAfter:  time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC),
 	})
 	display.Update(scanner.Progress{
-		FilesDiscovered:   10,
-		FilesScanned:      10,
-		FilesCapped:       3,
-		CertificatesFound: 1,
-		DiscoveryComplete: true,
+		FilesDiscovered:          10,
+		FilesScanned:             10,
+		FilesCapped:              3,
+		ArchiveEntriesDiscovered: 3,
+		ArchiveEntriesScanned:    3,
+		ArchiveEntriesCapped:     1,
+		CertificatesFound:        1,
+		DiscoveryComplete:        true,
 	})
 	display.SetIdentitySummary(certificateIdentitySummary{Matched: 1, Unique: 1})
 	display.Stop(true)
@@ -66,8 +75,10 @@ func TestProgressDisplayPrintsConfigurationProgressAndCertificate(t *testing.T) 
 			"identity=duplicates output=text quiet=false\n",
 		"Traversal: exclude=.git,cache extensions=.pem,.crt one-file-system=true follow-symlinks=true ignore-errors=true\n",
 		"Verification: enabled=true roots=/etc/private-root.pem roots-only=true\n",
-		"Scanning: 4/10 files scanned; 6 pending; 1 certificate found; discovering files...\n",
-		"Scan complete: 10 files scanned, 3 stopped at max-bytes; 1 certificate found; 1 certificate matched; " +
+		"Archives: enabled=true max-bytes=67108864 max-entries=10000 max-depth=3\n",
+		"Scanning: 4/10 files scanned; 6 pending; 2/3 archive entries scanned; 1 certificate found; discovering files...\n",
+		"Scan complete: 10 files scanned, 3 stopped at max-bytes; 3 archive entries scanned, 1 stopped at max-bytes; " +
+			"1 certificate found; 1 certificate matched; " +
 			"1 unique certificate; 0 duplicate occurrences; 0 errors;",
 	}
 	for _, part := range progressParts {

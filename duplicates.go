@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -18,9 +19,10 @@ const (
 )
 
 type certificateLocation struct {
-	Path     string            `json:"path"`
-	Index    int               `json:"index"`
-	Keystore *jsonKeystoreInfo `json:"keystore,omitempty"`
+	Path           string            `json:"path"`
+	ArchiveEntries []string          `json:"archive_entries,omitempty"`
+	Index          int               `json:"index"`
+	Keystore       *jsonKeystoreInfo `json:"keystore,omitempty"`
 }
 
 type certificateGroup struct {
@@ -53,6 +55,12 @@ func summarizeCertificateIdentities(counts map[string]int64) certificateIdentity
 func groupCertificates(certificates []scanner.Certificate) []certificateGroup {
 	sort.Slice(certificates, func(left, right int) bool {
 		if certificates[left].Path == certificates[right].Path {
+			if compared := slices.Compare(
+				certificates[left].ArchiveEntries,
+				certificates[right].ArchiveEntries,
+			); compared != 0 {
+				return compared < 0
+			}
 			return certificates[left].Index < certificates[right].Index
 		}
 		return certificates[left].Path < certificates[right].Path
@@ -68,9 +76,10 @@ func groupCertificates(certificates []scanner.Certificate) []certificateGroup {
 			groups = append(groups, certificateGroup{Certificate: certificate})
 		}
 		groups[groupIndex].Locations = append(groups[groupIndex].Locations, certificateLocation{
-			Path:     certificate.Path,
-			Index:    certificate.Index,
-			Keystore: newJSONKeystoreInfo(certificate.Keystore),
+			Path:           certificate.Path,
+			ArchiveEntries: slices.Clone(certificate.ArchiveEntries),
+			Index:          certificate.Index,
+			Keystore:       newJSONKeystoreInfo(certificate.Keystore),
 		})
 	}
 	return groups
@@ -104,7 +113,11 @@ func printCertificateGroupAt(output io.Writer, group certificateGroup, now time.
 }
 
 func formatCertificateLocation(location certificateLocation) string {
-	result := fmt.Sprintf("%s [index %d]", location.Path, location.Index)
+	result := fmt.Sprintf(
+		"%s [index %d]",
+		formatLogicalLocation(location.Path, location.ArchiveEntries),
+		location.Index,
+	)
 	if location.Keystore == nil {
 		return result
 	}
