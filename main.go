@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -53,6 +54,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.SetOutput(stderr)
 	var excludes excludeFlag
 	var extensions extensionFlag
+	var roots rootFlag
 	maxBytes := flags.Int64(
 		"max-bytes",
 		scanner.DefaultMaxBytes,
@@ -63,6 +65,22 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	flags.Var(&extensions, "extensions", "scan only these file extensions; comma-separated or repeatable")
 	oneFileSystem := flags.Bool("one-file-system", false, "do not scan files or directories on other filesystems (Linux and macOS)")
 	followSymlinks := flags.Bool("follow-symlinks", false, "follow symlinks encountered below PATH while preventing cycles")
+	archives := flags.Bool("archives", false, "scan certificates inside ZIP, TAR, and gzip archives")
+	archiveMaxBytes := flags.Int64(
+		"archive-max-bytes",
+		scanner.DefaultArchiveMaxBytes,
+		"maximum decompressed bytes inspected per outer archive",
+	)
+	archiveMaxEntries := flags.Int(
+		"archive-max-entries",
+		scanner.DefaultArchiveMaxEntries,
+		"maximum entries inspected per outer archive, including nested archives",
+	)
+	archiveMaxDepth := flags.Int(
+		"archive-max-depth",
+		scanner.DefaultArchiveMaxDepth,
+		"maximum archive nesting depth, counting the outer archive as one",
+	)
 	ignoreErrors := flags.Bool("ignore-errors", false, "exclude non-fatal file scan errors from the exit status")
 	usageValue := flags.String("usage", "", "filter by extended key usage, such as server or client")
 	var hostname hostnameFlag
@@ -71,6 +89,9 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	expirationValue := flags.String("expiration", "", "print certificates expired or expiring within a duration, such as 30d")
 	failExpired := flags.Bool("fail-expired", false, "return the operational-finding status when an expired certificate matches")
 	failExpiringValue := flags.String("fail-expiring", "", "return the operational-finding status for matches expiring within a duration")
+	verify := flags.Bool("verify", false, "verify certificate chains offline against trusted roots")
+	flags.Var(&roots, "roots", "add certificates from PATH as private trust anchors; repeatable; requires -verify")
+	rootsOnly := flags.Bool("roots-only", false, "trust only -roots certificates instead of augmenting system roots")
 	unique := flags.Bool("unique", false, "group identical certificates and print each SHA-256 fingerprint once")
 	duplicates := flags.Bool("duplicates", false, "print only SHA-256 groups found in more than one location")
 	jsonOutput := flags.Bool("json", false, "print results as JSON")
@@ -104,12 +125,33 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		flags.Usage()
 		return exitUsageError
 	}
+	providedFlags := make(map[string]bool)
+	flags.Visit(func(visited *flag.Flag) {
+		providedFlags[visited.Name] = true
+	})
 	if *maxBytes < 0 {
 		logger.Error("invalid option", "option", "max-bytes", "error", "value cannot be negative")
 		return exitUsageError
 	}
 	if *workers < 1 {
 		logger.Error("invalid option", "option", "workers", "error", "value must be at least 1")
+		return exitUsageError
+	}
+	if *archiveMaxBytes < 1 {
+		logger.Error("invalid option", "option", "archive-max-bytes", "error", "value must be positive")
+		return exitUsageError
+	}
+	if *archiveMaxEntries < 1 {
+		logger.Error("invalid option", "option", "archive-max-entries", "error", "value must be positive")
+		return exitUsageError
+	}
+	if *archiveMaxDepth < 1 {
+		logger.Error("invalid option", "option", "archive-max-depth", "error", "value must be positive")
+		return exitUsageError
+	}
+	if !*archives && (providedFlags["archive-max-bytes"] || providedFlags["archive-max-entries"] ||
+		providedFlags["archive-max-depth"]) {
+		logger.Error("invalid option", "error", "archive limit options require -archives")
 		return exitUsageError
 	}
 	usage, err := normalizeUsage(*usageValue)
@@ -151,6 +193,14 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		logger.Error("conflicting options", "options", "json,jsonl")
 		return exitUsageError
 	}
+	if !*verify && (len(roots) > 0 || *rootsOnly) {
+		logger.Error("invalid option", "error", "-roots and -roots-only require -verify")
+		return exitUsageError
+	}
+	if *rootsOnly && len(roots) == 0 {
+		logger.Error("invalid option", "error", "-roots-only requires at least one -roots path")
+		return exitUsageError
+	}
 	if *unique && *duplicates {
 		logger.Error("conflicting options", "options", "unique,duplicates")
 		return exitUsageError
@@ -184,22 +234,38 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 	now := time.Now()
 	display := newProgressDisplay(stderr, stdout, outputFormat == outputText, *quiet)
 	display.Start(scanConfiguration{
-		Path:           flags.Arg(0),
-		Workers:        *workers,
-		MaxBytes:       *maxBytes,
-		Exclude:        append([]string{}, excludes...),
-		Extensions:     append([]string{}, extensions...),
-		OneFileSystem:  *oneFileSystem,
-		FollowSymlinks: *followSymlinks,
-		IgnoreErrors:   *ignoreErrors,
-		Usage:          usage,
-		Hostname:       hostnameFilter,
-		Expiration:     expirationDescription,
-		FailExpiring:   failExpirationDescription,
-		IdentityMode:   identityMode,
-		Output:         outputFormat,
-		Quiet:          *quiet,
+		Path:              flags.Arg(0),
+		Workers:           *workers,
+		MaxBytes:          *maxBytes,
+		Exclude:           append([]string{}, excludes...),
+		Extensions:        append([]string{}, extensions...),
+		OneFileSystem:     *oneFileSystem,
+		FollowSymlinks:    *followSymlinks,
+		Archives:          *archives,
+		ArchiveMaxBytes:   *archiveMaxBytes,
+		ArchiveMaxEntries: *archiveMaxEntries,
+		ArchiveMaxDepth:   *archiveMaxDepth,
+		IgnoreErrors:      *ignoreErrors,
+		Usage:             usage,
+		Hostname:          hostnameFilter,
+		Expiration:        expirationDescription,
+		FailExpiring:      failExpirationDescription,
+		Verify:            *verify,
+		Roots:             append([]string{}, roots...),
+		RootsOnly:         *rootsOnly,
+		IdentityMode:      identityMode,
+		Output:            outputFormat,
+		Quiet:             *quiet,
 	})
+	var verificationRoots []scanner.Certificate
+	if *verify && len(roots) > 0 {
+		verificationRoots, err = loadVerificationRoots(ctx, roots, *workers)
+		if err != nil {
+			display.Stop(false)
+			logger.Error("load verification roots", "error", err)
+			return exitRuntimeError
+		}
+	}
 
 	scanContext, cancelScan := context.WithCancel(ctx)
 	defer cancelScan()
@@ -221,10 +287,17 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		Extensions:             append([]string{}, extensions...),
 		OneFileSystem:          *oneFileSystem,
 		FollowSymlinks:         *followSymlinks,
-		DiscardCertificates:    !*jsonOutput && !groupedOutput,
+		ScanArchives:           *archives,
+		ArchiveMaxBytes:        *archiveMaxBytes,
+		ArchiveMaxEntries:      *archiveMaxEntries,
+		ArchiveMaxDepth:        *archiveMaxDepth,
+		DiscardCertificates:    !*jsonOutput && !groupedOutput && !*verify,
 		DiscardPKCS12Encrypted: !*jsonOutput,
 		OnProgress:             onProgress,
 		OnCertificate: func(certificate scanner.Certificate) {
+			if *verify {
+				return
+			}
 			if outputErr != nil || !certificateMatches(certificate, usage, hostnameFilter, expiration, hasExpiration, now) {
 				return
 			}
@@ -269,6 +342,45 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 		display.Stop(false)
 		logger.Error("scan failed", "path", flags.Arg(0), "error", err)
 		return exitRuntimeError
+	}
+	if *verify {
+		report.Certificates, err = scanner.VerifyCertificates(report.Certificates, scanner.VerificationOptions{
+			CurrentTime:        now,
+			DNSName:            hostnameFilter,
+			IncludeSystemRoots: !*rootsOnly,
+			Roots:              verificationRoots,
+		})
+		if err != nil {
+			display.Stop(false)
+			logger.Error("verify certificates", "error", err)
+			return exitRuntimeError
+		}
+		for _, certificate := range report.Certificates {
+			if !certificateMatches(certificate, usage, hostnameFilter, expiration, hasExpiration, now) {
+				continue
+			}
+			identityCounts[certificate.SHA256Fingerprint]++
+			if hasFailExpiration && certificateExpiresWithin(certificate, failExpiration, now) {
+				operationalFinding = true
+			}
+			if groupedOutput {
+				continue
+			}
+			switch outputFormat {
+			case outputText:
+				display.Certificate(certificate)
+			case outputJSONL:
+				outputErr = jsonLinesEncoder.Encode(newJSONCertificate(certificate, time.Now()))
+			}
+			if outputErr != nil {
+				break
+			}
+		}
+		if outputErr != nil {
+			display.Stop(false)
+			logger.Error("write JSON Lines", "error", outputErr)
+			return exitRuntimeError
+		}
 	}
 	var filtered []scanner.Certificate
 	var groups []certificateGroup
@@ -325,7 +437,57 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int 
 
 type excludeFlag []string
 
+type rootFlag []string
+
 type hostnameFlag string
+
+func (values *rootFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *rootFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("root path cannot be empty")
+	}
+	value = filepath.Clean(value)
+	if !contains(*values, value) {
+		*values = append(*values, value)
+	}
+	return nil
+}
+
+func loadVerificationRoots(ctx context.Context, paths []string, workers int) ([]scanner.Certificate, error) {
+	var certificates []scanner.Certificate
+	seen := make(map[string]struct{})
+	for _, rootPath := range paths {
+		report, err := scanner.Scan(ctx, rootPath, scanner.Options{MaxBytes: scanner.DefaultMaxBytes, Workers: workers})
+		if err != nil {
+			return nil, fmt.Errorf("scan %q: %w", rootPath, err)
+		}
+		if len(report.Errors) > 0 {
+			errorsAtPath := make([]error, 0, len(report.Errors))
+			for _, scanErr := range report.Errors {
+				errorsAtPath = append(errorsAtPath, scanErr)
+			}
+			return nil, fmt.Errorf("scan %q: %w", rootPath, errors.Join(errorsAtPath...))
+		}
+		if len(report.PKCS12Encrypted) > 0 {
+			return nil, fmt.Errorf("scan %q: contains encrypted PKCS#12 content", rootPath)
+		}
+		if len(report.Certificates) == 0 {
+			return nil, fmt.Errorf("scan %q: no certificates found", rootPath)
+		}
+		for _, certificate := range report.Certificates {
+			if _, exists := seen[certificate.SHA256Fingerprint]; exists {
+				continue
+			}
+			seen[certificate.SHA256Fingerprint] = struct{}{}
+			certificates = append(certificates, certificate)
+		}
+	}
+	return certificates, nil
+}
 
 func (hostname *hostnameFlag) String() string {
 	return string(*hostname)
@@ -433,7 +595,12 @@ func printCertificate(output io.Writer, certificate scanner.Certificate) error {
 }
 
 func printCertificateAt(output io.Writer, certificate scanner.Certificate, now time.Time) error {
-	if _, err := fmt.Fprintf(output, "%s [index %d]\n", certificate.Path, certificate.Index); err != nil {
+	if _, err := fmt.Fprintf(
+		output,
+		"%s [index %d]\n",
+		formatLogicalLocation(certificate.Path, certificate.ArchiveEntries),
+		certificate.Index,
+	); err != nil {
 		return err
 	}
 	return printCertificateDetailsAt(output, certificate, now)
@@ -520,6 +687,42 @@ func printCertificateDetailsAt(output io.Writer, certificate scanner.Certificate
 	for _, line := range lines {
 		if _, err := fmt.Fprintln(output, line); err != nil {
 			return err
+		}
+	}
+	if certificate.Verification != nil {
+		if _, err := fmt.Fprintln(output, "  Verification status: "+certificate.Verification.Status); err != nil {
+			return err
+		}
+		if certificate.Verification.Error != "" {
+			if _, err := fmt.Fprintln(output, "  Verification error: "+certificate.Verification.Error); err != nil {
+				return err
+			}
+		}
+		if len(certificate.Verification.Chains) > 0 {
+			if _, err := fmt.Fprintf(output, "  Verified chains: %d\n", len(certificate.Verification.Chains)); err != nil {
+				return err
+			}
+			for chainIndex, chain := range certificate.Verification.Chains {
+				if _, err := fmt.Fprintf(output, "    Chain %d:\n", chainIndex); err != nil {
+					return err
+				}
+				for certificateIndex, chainCertificate := range chain {
+					anchor := ""
+					if chainCertificate.TrustAnchor {
+						anchor = " (trust anchor)"
+					}
+					if _, err := fmt.Fprintf(
+						output,
+						"      %d: %s [sha256 %s]%s\n",
+						certificateIndex,
+						chainCertificate.Subject,
+						chainCertificate.SHA256Fingerprint,
+						anchor,
+					); err != nil {
+						return err
+					}
+				}
+			}
 		}
 	}
 	return nil
@@ -626,6 +829,7 @@ func contains(values []string, wanted string) bool {
 
 type jsonCertificate struct {
 	Path                         string            `json:"path,omitempty"`
+	ArchiveEntries               []string          `json:"archive_entries,omitempty"`
 	Index                        *int              `json:"index,omitempty"`
 	Subject                      string            `json:"subject"`
 	Issuer                       string            `json:"issuer"`
@@ -643,6 +847,20 @@ type jsonCertificate struct {
 	ValidTo                      string            `json:"valid_to"`
 	ValidityStatus               string            `json:"validity_status"`
 	Keystore                     *jsonKeystoreInfo `json:"keystore,omitempty"`
+	Verification                 *jsonVerification `json:"verification,omitempty"`
+}
+
+type jsonVerification struct {
+	Status string                               `json:"status"`
+	Error  string                               `json:"error,omitempty"`
+	Chains [][]jsonVerificationChainCertificate `json:"chains,omitempty"`
+}
+
+type jsonVerificationChainCertificate struct {
+	Subject           string `json:"subject"`
+	Issuer            string `json:"issuer"`
+	SHA256Fingerprint string `json:"sha256_fingerprint"`
+	TrustAnchor       bool   `json:"trust_anchor"`
 }
 
 type jsonKeystoreInfo struct {
@@ -655,9 +873,10 @@ type jsonKeystoreInfo struct {
 }
 
 type jsonPKCS12EncryptedContent struct {
-	RecordType string                    `json:"record_type"`
-	Path       string                    `json:"path"`
-	PKCS12     jsonPKCS12EncryptedDetail `json:"pkcs12"`
+	RecordType     string                    `json:"record_type"`
+	Path           string                    `json:"path"`
+	ArchiveEntries []string                  `json:"archive_entries,omitempty"`
+	PKCS12         jsonPKCS12EncryptedDetail `json:"pkcs12"`
 }
 
 type jsonPKCS12EncryptedDetail struct {
@@ -706,6 +925,7 @@ func newJSONCertificate(certificate scanner.Certificate, now time.Time) jsonCert
 	index := certificate.Index
 	return jsonCertificate{
 		Path:                         certificate.Path,
+		ArchiveEntries:               slices.Clone(certificate.ArchiveEntries),
 		Index:                        &index,
 		Subject:                      certificate.Subject,
 		Issuer:                       certificate.Issuer,
@@ -731,7 +951,32 @@ func newJSONCertificate(certificate scanner.Certificate, now time.Time) jsonCert
 		ValidTo:        certificate.NotAfter.UTC().Format(time.RFC3339),
 		ValidityStatus: certificate.ValidityStatus(now),
 		Keystore:       newJSONKeystoreInfo(certificate.Keystore),
+		Verification:   newJSONVerification(certificate.Verification),
 	}
+}
+
+func newJSONVerification(verification *scanner.VerificationResult) *jsonVerification {
+	if verification == nil {
+		return nil
+	}
+	result := &jsonVerification{
+		Status: verification.Status,
+		Error:  verification.Error,
+		Chains: make([][]jsonVerificationChainCertificate, 0, len(verification.Chains)),
+	}
+	for _, chain := range verification.Chains {
+		jsonChain := make([]jsonVerificationChainCertificate, 0, len(chain))
+		for _, certificate := range chain {
+			jsonChain = append(jsonChain, jsonVerificationChainCertificate{
+				Subject:           certificate.Subject,
+				Issuer:            certificate.Issuer,
+				SHA256Fingerprint: certificate.SHA256Fingerprint,
+				TrustAnchor:       certificate.TrustAnchor,
+			})
+		}
+		result.Chains = append(result.Chains, jsonChain)
+	}
+	return result
 }
 
 func newJSONKeystoreInfo(keystore *scanner.KeystoreInfo) *jsonKeystoreInfo {
@@ -750,8 +995,9 @@ func newJSONKeystoreInfo(keystore *scanner.KeystoreInfo) *jsonKeystoreInfo {
 
 func newJSONPKCS12EncryptedContent(finding scanner.PKCS12EncryptedContent) jsonPKCS12EncryptedContent {
 	return jsonPKCS12EncryptedContent{
-		RecordType: "pkcs12_encrypted_content",
-		Path:       finding.Path,
+		RecordType:     "pkcs12_encrypted_content",
+		Path:           finding.Path,
+		ArchiveEntries: slices.Clone(finding.ArchiveEntries),
 		PKCS12: jsonPKCS12EncryptedDetail{
 			Status:       "encrypted",
 			ContentIndex: finding.ContentIndex,
@@ -763,7 +1009,12 @@ func newJSONPKCS12EncryptedContent(finding scanner.PKCS12EncryptedContent) jsonP
 }
 
 func printPKCS12EncryptedContent(output io.Writer, finding scanner.PKCS12EncryptedContent) error {
-	if _, err := fmt.Fprintf(output, "%s [PKCS#12 content %d]\n", finding.Path, finding.ContentIndex); err != nil {
+	if _, err := fmt.Fprintf(
+		output,
+		"%s [PKCS#12 content %d]\n",
+		formatLogicalLocation(finding.Path, finding.ArchiveEntries),
+		finding.ContentIndex,
+	); err != nil {
 		return err
 	}
 	bagCount := "unknown"
@@ -780,4 +1031,11 @@ func printPKCS12EncryptedContent(output io.Writer, finding scanner.PKCS12Encrypt
 		}
 	}
 	return nil
+}
+
+func formatLogicalLocation(filePath string, archiveEntries []string) string {
+	if len(archiveEntries) == 0 {
+		return filePath
+	}
+	return filePath + ":" + strings.Join(archiveEntries, ":")
 }

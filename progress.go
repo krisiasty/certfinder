@@ -20,21 +20,28 @@ const (
 )
 
 type scanConfiguration struct {
-	Path           string
-	Workers        int
-	MaxBytes       int64
-	Exclude        []string
-	Extensions     []string
-	OneFileSystem  bool
-	FollowSymlinks bool
-	IgnoreErrors   bool
-	Usage          string
-	Hostname       string
-	Expiration     string
-	FailExpiring   string
-	IdentityMode   string
-	Output         string
-	Quiet          bool
+	Path              string
+	Workers           int
+	MaxBytes          int64
+	Exclude           []string
+	Extensions        []string
+	OneFileSystem     bool
+	FollowSymlinks    bool
+	Archives          bool
+	ArchiveMaxBytes   int64
+	ArchiveMaxEntries int
+	ArchiveMaxDepth   int
+	IgnoreErrors      bool
+	Usage             string
+	Hostname          string
+	Expiration        string
+	FailExpiring      string
+	Verify            bool
+	Roots             []string
+	RootsOnly         bool
+	IdentityMode      string
+	Output            string
+	Quiet             bool
 }
 
 type progressDisplay struct {
@@ -128,6 +135,19 @@ func (display *progressDisplay) Start(configuration scanConfiguration) {
 		configuration.FollowSymlinks,
 		configuration.IgnoreErrors,
 	)
+	display.writeProgress(
+		"Verification: enabled=%t roots=%s roots-only=%t\n",
+		configuration.Verify,
+		formatOptionList(configuration.Roots, "none"),
+		configuration.RootsOnly,
+	)
+	display.writeProgress(
+		"Archives: enabled=%t max-bytes=%d max-entries=%d max-depth=%d\n",
+		configuration.Archives,
+		configuration.ArchiveMaxBytes,
+		configuration.ArchiveMaxEntries,
+		configuration.ArchiveMaxDepth,
+	)
 	display.writeProgress("\n")
 	display.drawStatusLocked()
 	display.mu.Unlock()
@@ -152,6 +172,12 @@ func (display *progressDisplay) Update(progress scanner.Progress) {
 	display.progress.FilesDiscovered = max(display.progress.FilesDiscovered, progress.FilesDiscovered)
 	display.progress.FilesScanned = max(display.progress.FilesScanned, progress.FilesScanned)
 	display.progress.FilesCapped = max(display.progress.FilesCapped, progress.FilesCapped)
+	display.progress.ArchiveEntriesDiscovered = max(
+		display.progress.ArchiveEntriesDiscovered,
+		progress.ArchiveEntriesDiscovered,
+	)
+	display.progress.ArchiveEntriesScanned = max(display.progress.ArchiveEntriesScanned, progress.ArchiveEntriesScanned)
+	display.progress.ArchiveEntriesCapped = max(display.progress.ArchiveEntriesCapped, progress.ArchiveEntriesCapped)
 	display.progress.CertificatesFound = max(display.progress.CertificatesFound, progress.CertificatesFound)
 	display.progress.PKCS12Encrypted = max(display.progress.PKCS12Encrypted, progress.PKCS12Encrypted)
 	display.progress.ScanErrors = max(display.progress.ScanErrors, progress.ScanErrors)
@@ -246,11 +272,15 @@ func (display *progressDisplay) Stop(completed bool) {
 		)
 	}
 	display.writeProgress(
-		"%s: %d %s scanned, %d stopped at max-bytes; %d %s found;%s%s %d %s; elapsed %s\n",
+		"%s: %d %s scanned, %d stopped at max-bytes; %d archive %s scanned, %d stopped at max-bytes; "+
+			"%d %s found;%s%s %d %s; elapsed %s\n",
 		state,
 		display.progress.FilesScanned,
 		plural(display.progress.FilesScanned, "file", "files"),
 		display.progress.FilesCapped,
+		display.progress.ArchiveEntriesScanned,
+		plural(display.progress.ArchiveEntriesScanned, "entry", "entries"),
+		display.progress.ArchiveEntriesCapped,
 		display.progress.CertificatesFound,
 		plural(display.progress.CertificatesFound, "certificate", "certificates"),
 		identitySummary,
@@ -295,10 +325,12 @@ func (display *progressDisplay) drawStatusLocked() {
 		discovery = "discovery complete"
 	}
 	status := fmt.Sprintf(
-		"Scanning: %d/%d files scanned; %d pending; %d %s found; %s",
+		"Scanning: %d/%d files scanned; %d pending; %d/%d archive entries scanned; %d %s found; %s",
 		display.progress.FilesScanned,
 		display.progress.FilesDiscovered,
 		pending,
+		display.progress.ArchiveEntriesScanned,
+		display.progress.ArchiveEntriesDiscovered,
 		display.progress.CertificatesFound,
 		plural(display.progress.CertificatesFound, "certificate", "certificates"),
 		discovery,
