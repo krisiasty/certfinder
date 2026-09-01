@@ -28,3 +28,5 @@ go.work.sum
 # .vscode/
 
 dist/
+# graphify knowledge graph output
+graphify-out/
